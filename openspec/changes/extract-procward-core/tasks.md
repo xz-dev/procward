@@ -7,7 +7,7 @@
 
 ## 2. Push the compiling skeleton and get full CI feedback early
 
-- [ ] 2.1 As soon as the Linux slice compiles, create/use the GitHub repository and set the exact description/13 topics from `design.md` with `gh repo edit`; verify metadata/canonical URL through `gh repo view`, then push the compiling project without waiting for all backends, a sealed packet or independent review. This task applies only to the later authorized implementation phase.
+- [x] 2.1 As soon as the Linux slice compiles, create/use the GitHub repository and set the exact description/13 topics from `design.md` with `gh repo edit`; verify metadata/canonical URL through `gh repo view`, then push the compiling project without waiting for all backends, a sealed packet or independent review. This task applies only to the later authorized implementation phase.
 - [ ] 2.2 Enable unfiltered branch `push` and `pull_request` full-suite CI across all 10 target rows: Linux GNU/musl x64/arm64, FreeBSD x64/arm64 via pinned VM action, macOS x64/arm64 and Windows x64/arm64; verify real fixture execution and visible incomplete/failing backend rows, no pi tests, no path filters and no matrix/new-event cancellation of required coverage.
 - [ ] 2.3 Verify normal reruns and fix-forward development work on the early matrix, including a docs-only event and an ordinary flaky-job rerun; keep previous logs, do not weaken assertions, and do not add once-only dispatches, sealed manifests, re-arm tooling or per-step review gates.
 

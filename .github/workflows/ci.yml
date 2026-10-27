@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: BSD-3-Clause
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15, target: aarch64-apple-darwin }
+          - { runner: windows-2025, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Source, executor and toolchain
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+      - name: Full standalone fixture suite
+        run: cargo test --locked --all-targets -- --nocapture
+      - name: MSRV
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal --no-self-update
+          cargo +1.87.0 check --locked --all-targets
+  musl:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Native musl build and full fixture execution
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.23 sh -ec '
+            apk add --no-cache cargo rust musl-dev gcc git
+            git -c safe.directory=/src rev-parse HEAD
+            rustc -vV
+            test "$(rustc -vV | sed -n "s/host: //p")" = "${{ matrix.target }}"
+            cargo test --locked --all-targets -- --nocapture
+          '
+  freebsd:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-freebsd }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-freebsd }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
+        with:
+          release: '14.3'
+          arch: ${{ matrix.arch }}
+          copyback: false
+          prepare: pkg install -y rust git
+          run: |
+            set -eu
+            git -c safe.directory="$PWD" rev-parse HEAD
+            uname -a
+            rustc -vV
+            test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+            cargo test --locked --all-targets -- --nocapture

@@ -12,6 +12,10 @@ description = "Process-tree ownership and job control for CLI programs"
 name = "cli"
 path = "tests/cli.rs"
 
+[[test]]
+name = "platform"
+path = "tests/platform.rs"
+
 [[example]]
 name = "fixture"
 path = "tests/fixtures/main.rs"

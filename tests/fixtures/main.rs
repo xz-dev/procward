@@ -4,7 +4,6 @@ use std::{
     ffi::OsStr,
     fs,
     io::{self, Read, Write},
-    os::unix::ffi::OsStrExt,
     path::Path,
     process::{self, Command, Stdio},
     thread,
@@ -69,9 +68,18 @@ fn main() {
 }
 
 fn record(out: &mut impl Write, value: &OsStr) {
-    let bytes = value.as_bytes();
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_bytes().to_vec()
+    };
+    #[cfg(windows)]
+    let bytes: Vec<_> = {
+        use std::os::windows::ffi::OsStrExt;
+        value.encode_wide().flat_map(u16::to_le_bytes).collect()
+    };
     out.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-    out.write_all(bytes).unwrap();
+    out.write_all(&bytes).unwrap();
 }
 
 fn spawn(mode: &str, dir: &Path) -> process::Child {
