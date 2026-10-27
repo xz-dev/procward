@@ -13,6 +13,84 @@ use std::{
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        #[cfg(windows)]
+        "job-member" => {
+            use windows_sys::Win32::System::{
+                JobObjects::{
+                    IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                    QueryInformationJobObject,
+                },
+                Threading::GetCurrentProcess,
+            };
+            let mut member = 0;
+            assert_ne!(
+                unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut member) },
+                0
+            );
+            assert_ne!(member, 0, "payload ran outside Job");
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            assert_ne!(
+                unsafe {
+                    QueryInformationJobObject(
+                        std::ptr::null_mut(),
+                        JobObjectExtendedLimitInformation,
+                        (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                        std::mem::size_of_val(&limits) as u32,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert_ne!(
+                limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                0,
+                "payload began before kill-on-close Job policy"
+            );
+            process::exit(23);
+        }
+        #[cfg(windows)]
+        "limited-launch" => {
+            use windows_sys::Win32::{
+                Foundation::CloseHandle,
+                System::{JobObjects::*, Threading::GetCurrentProcess},
+            };
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!job.is_null());
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            limits.BasicLimitInformation.ActiveProcessLimit = 1;
+            assert_ne!(
+                unsafe {
+                    SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                        std::mem::size_of_val(&limits) as u32,
+                    )
+                },
+                0
+            );
+            assert_ne!(
+                unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) },
+                0
+            );
+            let attempt = Command::new(&args[2])
+                .args(["run", "--"])
+                .arg(env::current_exe().unwrap())
+                .arg("touch")
+                .arg(&args[3])
+                .status();
+            if let Ok(status) = attempt {
+                assert!(
+                    !status.success(),
+                    "restricted payload unexpectedly succeeded"
+                );
+            }
+            assert!(!Path::new(&args[3]).try_exists().unwrap());
+            assert_ne!(unsafe { CloseHandle(job) }, 0);
+            process::exit(23);
+        }
         "probe" => {
             let mut out = io::stdout().lock();
             for arg in &args[2..] {
@@ -27,7 +105,7 @@ fn main() {
             eprintln!("fixture-stderr");
             process::exit(23);
         }
-        "exit" => process::exit(args[2].to_str().unwrap().parse().unwrap()),
+        "exit" => process::exit(args[2].to_str().unwrap().parse::<u32>().unwrap() as i32),
         "touch" => fs::write(&args[2], b"payload ran").unwrap(),
         mode => {
             let dir = Path::new(&args[2]);
