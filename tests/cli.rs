@@ -383,3 +383,56 @@ fn ordinary_exit_codes_are_preserved() {
         assert_eq!(Run::start(cmd).finish().status.code(), Some(code));
     }
 }
+
+#[test]
+fn detached_stopped_descendants_are_alive_until_owned_cleanup_reaps_them() {
+    let dir = Scratch::new();
+    let mut run = Run::fixture("detached-tree", &dir.0);
+    let primary = run.remember(&dir.0, "detached-tree");
+    let branch = run.remember(&dir.0, "detached-branch");
+    let worker = run.remember(&dir.0, "stopped-worker");
+    poll(|| {
+        fs::read_to_string(format!("/proc/{worker}/status"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("State:\tT"))
+    });
+    assert!(!absent(worker), "stopped work is alive");
+    run.release_primary();
+    let output = run.finish();
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    for pid in [primary, branch, worker] {
+        assert!(
+            absent(pid),
+            "owned process {pid} survived (including zombies)"
+        );
+    }
+}
+
+#[test]
+fn stale_pidfd_cannot_signal_later_unrelated_work() {
+    let dir = Scratch::new();
+    let mut old = Run::fixture("waiting", &dir.0);
+    old.remember(&dir.0, "waiting");
+    old.release_primary();
+    assert!(old.finish().status.success());
+    let other = Scratch::new();
+    let mut unrelated = Run::fixture("waiting", &other.0);
+    let pid = unrelated.remember(&other.0, "waiting");
+    assert_eq!(
+        pidfd_send_signal(&old.fixtures[0], Signal::TERM),
+        Err(rustix::io::Errno::SRCH)
+    );
+    assert!(!absent(pid));
+    assert!(
+        unrelated
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none()
+    );
+    unrelated.release_primary();
+    assert!(unrelated.finish().status.success());
+}

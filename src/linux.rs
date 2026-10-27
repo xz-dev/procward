@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+use crate::linux_inventory::{Inventory, children};
 use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use rustix::{
     io::Errno,
@@ -27,8 +28,9 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
         .wrap(ProcessGroup::leader())
         .spawn()?;
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
-    let result = observe_primary(child.as_ref(), primary, &mut signals);
-    let cleanup = cleanup(child.as_ref());
+    let mut inventory = Inventory::new();
+    let result = observe_primary(child.as_ref(), primary, &mut signals, &mut inventory);
+    let cleanup = cleanup(&mut inventory);
     cleanup?;
     let status = result?;
     Ok(status
@@ -41,8 +43,10 @@ fn observe_primary(
     child: &dyn ChildWrapper,
     primary: Pid,
     signals: &mut Signals,
+    inventory: &mut Inventory,
 ) -> io::Result<WaitIdStatus> {
     loop {
+        inventory.refresh()?;
         match process::waitid(
             WaitId::Pid(primary),
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
@@ -51,7 +55,7 @@ fn observe_primary(
             Ok(None) | Err(Errno::INTR) => {}
             Err(error) => return Err(error.into()),
         }
-        reap_adopted(primary)?;
+        reap_adopted(primary, inventory)?;
         for signal in signals.pending().filter(|signal| *signal != SIGCHLD) {
             child.signal(signal)?;
         }
@@ -59,17 +63,12 @@ fn observe_primary(
     }
 }
 
-fn reap_adopted(primary: Pid) -> io::Result<()> {
-    // rustix waitid has no returned-PID accessor; enumerate only our direct children.
-    for raw in fs::read_to_string("/proc/thread-self/children")?.split_whitespace() {
-        let pid = raw
-            .parse()
-            .ok()
-            .and_then(Pid::from_raw)
-            .ok_or_else(|| io::Error::other("invalid child PID from procfs"))?;
+fn reap_adopted(primary: Pid, inventory: &mut Inventory) -> io::Result<()> {
+    for pid in children()? {
         if pid != primary {
             match process::waitpid(Some(pid), WaitOptions::NOHANG) {
-                Ok(_) | Err(Errno::INTR) => {}
+                Ok(Some(_)) => inventory.forget(pid),
+                Ok(None) | Err(Errno::INTR) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -77,23 +76,20 @@ fn reap_adopted(primary: Pid) -> io::Result<()> {
     Ok(())
 }
 
-fn cleanup(child: &dyn ChildWrapper) -> io::Result<()> {
-    // Keep the primary unreaped until the final group signal, so its PGID cannot be reused.
-    // shortcut: group-only immediate KILL; add detached identities and graceful policy in section 3.
-    let signalled = match child.signal(signal_hook::consts::SIGKILL) {
-        Err(error) if error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) => Ok(()),
-        result => result,
-    };
+fn cleanup(inventory: &mut Inventory) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_millis(7500);
     loop {
+        inventory.refresh()?;
+        inventory.signal(process::Signal::KILL)?;
         if Instant::now() >= deadline {
             return Err(io::Error::other(
-                "cleanup deadline expired: children remain (detached-tree cleanup is not implemented)",
+                "cleanup deadline expired: owned children remain",
             ));
         }
         match process::wait(WaitOptions::NOHANG) {
-            Ok(Some(_)) | Err(Errno::INTR) => continue,
-            Err(Errno::CHILD) => return signalled,
+            Ok(Some((pid, _))) => inventory.forget(pid),
+            Err(Errno::INTR) => continue,
+            Err(Errno::CHILD) => return Ok(()),
             Err(error) => return Err(error.into()),
             Ok(None) => {}
         }

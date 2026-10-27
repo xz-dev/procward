@@ -33,6 +33,29 @@ fn main() {
             let dir = Path::new(&args[2]);
             fs::write(dir.join(format!("{mode}.pid")), process::id().to_string()).unwrap();
             match mode {
+                #[cfg(target_os = "linux")]
+                "detached-tree" => {
+                    let _branch = spawn("detached-branch", dir);
+                    wait_for(&dir.join("stopped-worker.pid"));
+                    wait_for_input();
+                    process::exit(23);
+                }
+                #[cfg(target_os = "linux")]
+                "detached-branch" => {
+                    rustix::process::setsid().unwrap();
+                    spawn("stopped-worker", dir).wait().unwrap();
+                }
+                #[cfg(target_os = "linux")]
+                "stopped-worker" => {
+                    rustix::process::kill_process(
+                        rustix::process::getpid(),
+                        rustix::process::Signal::STOP,
+                    )
+                    .unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
                 "tree" => {
                     let _branch = spawn("branch", dir);
                     wait_for(&dir.join("worker.pid"));

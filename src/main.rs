@@ -3,6 +3,8 @@ use std::{env, ffi::OsString, process::ExitCode};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_inventory;
 
 const USAGE: &str = "procward 0.1.0\n\nUsage: procward run -- <command> [args...]\n       procward --help\n       procward --version\n\nLinux noninteractive walking skeleton; detached-tree and owner-loss cleanup not yet supported.";
 
