@@ -3,7 +3,6 @@ use crate::inventory::Inventory;
 use rustix::{
     fd::{AsRawFd, FromRawFd, OwnedFd},
     io::{self as rio, Errno, FdFlags},
-    pipe::{PipeFlags, pipe_with},
     process::{self, Pid, Signal},
 };
 use signal_hook::{
@@ -22,7 +21,19 @@ use std::{
 pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
     crate::reaper::acquire()?;
     let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
-    let (read, write) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
+    #[cfg(not(target_os = "macos"))]
+    let (read, write) = rustix::pipe::pipe_with(
+        rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+    )?;
+    #[cfg(target_os = "macos")]
+    let (read, write) = {
+        let pair = rustix::pipe::pipe()?;
+        for fd in [&pair.0, &pair.1] {
+            rio::fcntl_setfd(fd, FdFlags::CLOEXEC)?;
+            rustix::fs::fcntl_setfl(fd, rustix::fs::OFlags::NONBLOCK)?;
+        }
+        pair
+    };
     let expected = process::getpid();
     let raw = read.as_raw_fd();
     let mut anchor = Command::new(std::env::current_exe()?);
