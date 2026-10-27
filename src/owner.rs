@@ -45,16 +45,18 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
     drop(read);
     rio::write(&write, b"R")?;
     let pid = Pid::from_raw(anchor.id() as i32).unwrap();
+    #[cfg(target_os = "macos")]
+    let mut observed = Inventory::new();
     loop {
+        #[cfg(target_os = "macos")]
+        observed.refresh()?;
         if let Some(status) = anchor.try_wait()? {
             drop(write);
             // Anchor loss is fatal even when it occurred before publishing any primary result.
-            let cleanup = crate::reaper::cleanup(
-                &mut Inventory::new(),
-                None,
-                &mut None,
-                status.signal().is_some(),
-            );
+            #[cfg(not(target_os = "macos"))]
+            let mut observed = Inventory::new();
+            let cleanup =
+                crate::reaper::cleanup(&mut observed, None, &mut None, status.signal().is_some());
             cleanup?;
             return Ok(status.code().unwrap_or(125) as u8);
         }
@@ -67,6 +69,7 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
 
 fn arm_parent(expected: Pid) -> io::Result<()> {
     // SIGCONT is a targeted kernel wake even if this independent role was stopped.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     process::set_parent_process_death_signal(Some(Signal::CONT))?;
     if process::getppid() != Some(expected) {
         return Err(io::Error::other(

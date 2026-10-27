@@ -6,7 +6,7 @@ use rustix::{
 };
 use std::{
     fs,
-    io::{self, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -198,6 +198,28 @@ fn freebsd_reaper_lifecycle_and_targeted_parent_death_wake() {
                 other => panic!("anchor wait: {other:?}"),
             }
         });
+    }
+    {
+        let mut run = Run::new("cleanup-order", 3);
+        let worker = run.pid("order-worker");
+        wait_file(&run.dir.join("order-ready"));
+        poll(Instant::now() + Duration::from_secs(20), || {
+            let out = Command::new("ps")
+                .args(["-o", "state=", "-p", &worker.to_string()])
+                .output()
+                .unwrap();
+            out.status.success() && String::from_utf8(out.stdout).unwrap().contains('T')
+        });
+        let start = Instant::now();
+        run.release();
+        assert_eq!(run.finish().code(), Some(23));
+        assert_eq!(
+            fs::read_to_string(run.dir.join("order-observed")).unwrap(),
+            "true 1"
+        );
+        assert!(!present(worker));
+        assert!(start.elapsed() >= Duration::from_secs(6));
+        assert!(start.elapsed() <= Duration::from_secs(8));
     }
     assert!(
         process::get_reaper_status(Some((

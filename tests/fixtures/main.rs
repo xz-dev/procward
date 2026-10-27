@@ -118,6 +118,37 @@ fn main() {
             let dir = Path::new(&args[2]);
             fs::write(dir.join(format!("{mode}.pid")), process::id().to_string()).unwrap();
             match mode {
+                #[cfg(target_os = "macos")]
+                "observed-tree" => {
+                    let _worker = spawn("observed-worker", dir);
+                    wait_for(&dir.join("observed-ready"));
+                    wait_for(&dir.join("detach"));
+                    process::exit(23);
+                }
+                #[cfg(target_os = "macos")]
+                "observed-worker" => {
+                    fs::write(dir.join("observed-ready"), b"ready").unwrap();
+                    wait_for(&dir.join("detach"));
+                    rustix::process::setsid().unwrap();
+                    fs::write(dir.join("observed-detached"), b"detached").unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                "fast-escape" => {
+                    let _worker = spawn("escape-worker", dir);
+                    wait_for(&dir.join("escaped"));
+                    wait_for(&dir.join("exit-escape"));
+                }
+                #[cfg(target_os = "macos")]
+                "escape-worker" => {
+                    rustix::process::setsid().unwrap();
+                    fs::write(dir.join("escaped"), b"escaped").unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "cleanup-order" => {
                     let _worker = spawn("order-worker", dir);

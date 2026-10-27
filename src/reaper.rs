@@ -137,7 +137,14 @@ pub(crate) fn cleanup(
                 continue;
             }
             Err(Errno::INTR) => continue,
-            Err(Errno::CHILD) => return Ok(()),
+            Err(Errno::CHILD) => {
+                #[cfg(target_os = "macos")]
+                if !inventory.is_empty() {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                return Ok(());
+            }
             Err(error) => return Err(error.into()),
             Ok(None) => {}
         }
