@@ -40,3 +40,93 @@ fn backend_runs_real_fixture_and_preserves_primary_status() {
         thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[test]
+fn native_arguments_and_redirected_streams_survive_backend_spawn() {
+    use std::{
+        ffi::{OsStr, OsString},
+        fs,
+        io::Write,
+        process::Stdio,
+    };
+    fn bytes(value: &OsStr) -> Vec<u8> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            value.as_bytes().to_vec()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            value.encode_wide().flat_map(u16::to_le_bytes).collect()
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("procward-platform-probe-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    #[cfg(unix)]
+    let dir = fs::canonicalize(dir).unwrap();
+    let fixture = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("examples/fixture{}", std::env::consts::EXE_SUFFIX));
+    let mut args: Vec<OsString> = ["two words", "--literal", "", "a\"b\\c", "$(not a shell) *"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        args.push(OsString::from_vec(vec![b'x', 0xff]));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        args.push(OsString::from_wide(&[b'x' as u16, 0xd800]));
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_procward"))
+        .args(["run", "--"])
+        .arg(fixture)
+        .arg("probe")
+        .args(&args)
+        .current_dir(&dir)
+        .env("PROCWARD_TEST_VALUE", "inherited value")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"input\0bytes")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("probe deadline; HARNESS RESCUE, not product cleanup");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    let mut expected = Vec::new();
+    for value in args
+        .iter()
+        .map(OsString::as_os_str)
+        .chain([dir.as_os_str(), OsStr::new("inherited value")])
+    {
+        let value = bytes(value);
+        expected.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        expected.extend_from_slice(&value);
+    }
+    expected.extend_from_slice(b"input\0bytes");
+    assert_eq!(output.stdout, expected);
+    assert_eq!(output.stderr, b"fixture-stderr\n");
+    fs::remove_dir_all(dir).unwrap();
+}

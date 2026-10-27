@@ -323,6 +323,7 @@ name = "procward"
 version = "0.1.0"
 dependencies = [
  "errno",
+ "libc",
  "libproc",
  "process-wrap",
  "rustix",

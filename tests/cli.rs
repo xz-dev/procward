@@ -668,3 +668,81 @@ fn ignoring_term_cannot_hold_cleanup_past_fault_deadline() {
     assert!(fault.elapsed() >= Duration::from_secs(6));
     assert!(fault.elapsed() <= Duration::from_secs(8));
 }
+
+#[test]
+fn denied_parent_death_wake_refuses_payload_before_side_effects() {
+    use std::os::unix::process::CommandExt;
+    let dir = Scratch::new();
+    let marker = dir.0.join("payload");
+    let instruction = |code: u32, jt, jf, k| libc::sock_filter {
+        code: code as u16,
+        jt,
+        jf,
+        k,
+    };
+    let filter = [
+        instruction(
+            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+            0,
+            0,
+            std::mem::offset_of!(libc::seccomp_data, nr) as u32,
+        ),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            3,
+            libc::SYS_prctl as u32,
+        ),
+        instruction(
+            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+            0,
+            0,
+            std::mem::offset_of!(libc::seccomp_data, args) as u32,
+        ),
+        instruction(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            libc::PR_SET_PDEATHSIG as u32,
+        ),
+        instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        ),
+        instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let mut cmd = command();
+    cmd.args(["run", "--"])
+        .arg(fixture())
+        .arg("touch")
+        .arg(&marker);
+    // Restriction applies only to this fresh child and its future helpers, never the host/test runner.
+    unsafe {
+        cmd.pre_exec(move || {
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_ptr().cast_mut(),
+            };
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::syscall(
+                    libc::SYS_seccomp,
+                    libc::SECCOMP_SET_MODE_FILTER,
+                    0,
+                    &program,
+                ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = Run::start(cmd).finish();
+    assert_eq!(output.status.code(), Some(125), "{output:?}");
+    assert!(!marker.try_exists().unwrap());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+        "{output:?}"
+    );
+}
