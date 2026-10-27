@@ -24,7 +24,21 @@ impl Inventory {
     pub fn advance(&mut self, phase: Phase) -> io::Result<()> {
         if phase == Phase::Kill {
             // Kernel targets the entire owned subtree, including nested reapers.
-            let result = process::reaper_kill(None, Signal::KILL, false, None)?;
+            let result = match process::reaper_kill(None, Signal::KILL, false, None) {
+                Ok(result) => result,
+                Err(Errno::SRCH) => {
+                    let remaining = process::get_reaper_pids(None)?;
+                    if remaining.iter().all(|info| {
+                        info.flags
+                            .intersects(PidInfoFlags::ZOMBIE | PidInfoFlags::EXITING)
+                    }) {
+                        // No signalable member remains; wait/reaper facts still decide completion.
+                        return Ok(());
+                    }
+                    return Err(Errno::SRCH.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
             if let Some(pid) = result.first_failed {
                 return Err(io::Error::other(format!(
                     "FreeBSD reaper failed to signal {pid}"
