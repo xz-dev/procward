@@ -3,7 +3,7 @@
 - [x] 1.1 Create a binary-first Rust package at version `0.1.0` with `process-wrap` 10.0.1 std frontend, narrow `rustix`/Unix `signal-hook` features and a checked lockfile/MSRV; implement `procward run -- <cmd>` using native argv, and verify `cargo check`, help/version and a fresh argv/status fixture without pi or a public library.
 - [x] 1.2 Add Linux subreaping and minimal primary-exit/group cleanup using crate APIs; verify fresh small fixtures preserve argv/cwd/stdio, remove ordinary descendants and return the primary status. Keep this first slice noninteractive and do not wait for complete cross-platform behaviour before the early push in section 2.
 - [x] 1.3 Add rejected-startup/exec-failure cases and a new orphan/tree fixture; verify invalid options/missing commands cause no payload side effects and a healthy primary does not retain adopted zombies.
-- [ ] 1.4 Add canonical root **BSD 3-Clause License**, exact Cargo `license = "BSD-3-Clause"` and appropriate SPDX identifiers for new code; verify no pi-env implementation/test/fixture code was copied or translated, no inherited pi-env MIT notice/relicensing gate is introduced, and actual crate licence obligations are recorded separately.
+- [x] 1.4 Add canonical root **BSD 3-Clause License**, exact Cargo `license = "BSD-3-Clause"` and appropriate SPDX identifiers for new code; verify no pi-env implementation/test/fixture code was copied or translated, no inherited pi-env MIT notice/relicensing gate is introduced, and actual crate licence obligations are recorded separately.
 
 ## 2. Push the compiling skeleton and get full CI feedback early
 
