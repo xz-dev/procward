@@ -154,3 +154,60 @@ At that ten-row checkpoint, tasks 1–3 were complete (14/34); sections 4–7 re
 job control, application/task contracts, release setup/review, owner-controlled
 release prerequisites and later pi integration. No tag, release, repository
 setting or pi/pi-env code was changed in this slice.
+
+## Expanded riscv64 checkpoint
+
+The binding riscv64 addition is implemented at `41210c0` in
+[run 40557371203](https://github.com/xz-dev/procward/actions/runs/40557371203).
+All twelve workflow rows concluded successfully after the ordinary failed-row
+rerun (attempt 2). This closes the reopened task 2.2; tasks 1–3 are again complete
+(14/34), with sections 4–7 still pending. This is not release acceptance.
+
+| Target | Result in 40557371203 |
+| --- | --- |
+| x86_64-unknown-linux-gnu | Passed, including Rust 1.87 check |
+| aarch64-unknown-linux-gnu | Passed |
+| x86_64-unknown-linux-musl | Passed |
+| aarch64-unknown-linux-musl | Passed |
+| riscv64gc-unknown-linux-gnu | Applicable assertions passed; **2 EMULATOR-UNSUPPORTED** cases |
+| riscv64gc-unknown-linux-musl | Applicable assertions passed; **1 EMULATOR-UNSUPPORTED** case |
+| x86_64-unknown-freebsd | Passed |
+| aarch64-unknown-freebsd | Passed |
+| x86_64-apple-darwin | Passed |
+| aarch64-apple-darwin | Passed on unchanged-source ordinary rerun |
+| x86_64-pc-windows-msvc | Passed, including console/ConPTY |
+| aarch64-pc-windows-msvc | Passed, including console/ConPTY |
+
+Both riscv64 jobs use the official rustup target, cross-build release-profile
+binaries/tests and execute the full invoked suite in pinned target containers.
+GNU uses the Ubuntu cross GCC/sysroot; musl uses shipped rust-lld plus
+`-C target-feature=+crt-static -C link-self-contained=yes`. ELF machine checks
+verify RISC-V outputs. Each exercised 7 unit, 19 CLI and 3 portable cases, but the
+Rust harness's successful return does **not** make the explicitly unsupported
+cases product passes. Job summaries count/list them: seccomp installation
+`ENOSYS` in both rows, plus known-missing-path std spawn returning a child exiting
+127 through qemu's broken vfork/posix_spawn error path in GNU. Musl's exec-error
+assertions ran normally. Genuine primary status 127 remains strict in both.
+See [platforms.md](platforms.md) for exact limits and full-system VM follow-up.
+Timing scale stays **1×**, with no wider budgets or weakened native assertions.
+No product code was changed for emulation.
+
+Initial expansion commit `e42091c`,
+[run 40552699322](https://github.com/xz-dev/procward/actions/runs/40552699322),
+kept both red riscv64 rows visible. GNU exposed the two emulator limitations;
+Alpine's distro Rust reported `riscv64-alpine-linux-musl`, not the required exact
+triple. Rather than alias that compiler or work around emulation in product code,
+`41210c0` switched both variants to official exact-target release builds and
+explicit runtime-probed unsupported results.
+
+Run 40557371203 attempt 1 also failed Darwin arm64's one-second post-normal-exit
+absence check and labelled its known-survivor harness rescue. The unchanged-source
+rerun passed; no assertion or timing was changed. Root cause is not established
+by those logs, so the nondeterministic observation/completion failure remains a
+risk, not a fixed product defect. Both attempts' logs remain available.
+
+Local follow-up gates passed outside the installed pi subreaper in task-owned
+`pw-riscv-*` tmux sessions: full Linux tests, clippy `-D warnings`, formatting,
+plus an official self-contained riscv64 musl release cross-build. Setting the
+emulator flag alone on native Linux still ran both original capability assertions
+and emitted zero unsupported markers. Strict OpenSpec validation passed.
