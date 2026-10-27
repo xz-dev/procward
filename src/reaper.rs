@@ -73,13 +73,25 @@ pub fn run_owned(
                 WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
             ) {
                 Ok(Some(status)) => {
-                    result = Some(
-                        status
-                            .exit_status()
-                            .or_else(|| status.terminating_signal().map(|s| 128 + s))
-                            .unwrap() as u8,
-                    );
-                    return Ok(());
+                    if let Some(code) = status
+                        .exit_status()
+                        .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
+                    {
+                        result = Some(code as u8);
+                        return Ok(());
+                    }
+                    // Darwin can return a nonterminal/empty notification with WNOHANG.
+                    // Stopped/continued work is still alive and must retain ownership.
+                    if status.raw_code() != 0
+                        && !status.stopped()
+                        && !status.continued()
+                        && !status.trapped()
+                    {
+                        return Err(io::Error::other(format!(
+                            "unexpected waitid code {}",
+                            status.raw_code()
+                        )));
+                    }
                 }
                 Ok(None) | Err(Errno::INTR) => {}
                 Err(error) => return Err(error.into()),
@@ -110,8 +122,12 @@ fn reap_adopted(primary: Pid, inventory: &mut Inventory) -> io::Result<()> {
     for pid in children()? {
         if pid != primary {
             match process::waitpid(Some(pid), WaitOptions::NOHANG) {
-                Ok(Some(_)) => inventory.forget(pid),
-                Ok(None) | Err(Errno::INTR) => {}
+                Ok(Some((_, status)))
+                    if status.exit_status().is_some() || status.terminating_signal().is_some() =>
+                {
+                    inventory.forget(pid)
+                }
+                Ok(Some(_)) | Ok(None) | Err(Errno::INTR) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -136,14 +152,16 @@ pub(crate) fn cleanup(
         inventory.advance(phase)?;
         match process::wait(WaitOptions::NOHANG) {
             Ok(Some((pid, status))) => {
-                inventory.forget(pid);
-                if Some(pid) == primary && result.is_none() {
-                    *result = Some(
-                        status
-                            .exit_status()
-                            .or_else(|| status.terminating_signal().map(|s| 128 + s))
-                            .unwrap() as u8,
-                    );
+                if let Some(code) = status
+                    .exit_status()
+                    .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
+                {
+                    inventory.forget(pid);
+                    if Some(pid) == primary && result.is_none() {
+                        *result = Some(code as u8);
+                    }
+                } else if !status.stopped() && !status.continued() {
+                    return Err(io::Error::other("unexpected nonterminal child wait status"));
                 }
                 continue;
             }
