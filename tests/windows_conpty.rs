@@ -40,10 +40,6 @@ impl Console {
         let result = unsafe {
             CreatePseudoConsole(COORD { X: 80, Y: 24 }, input_read, output_write, 0, &mut pc)
         };
-        unsafe {
-            CloseHandle(input_read);
-            CloseHandle(output_write);
-        }
         let input = unsafe { File::from_raw_handle(input_write) };
         let mut output = unsafe { File::from_raw_handle(output_read) };
         assert_eq!(result, 0, "CreatePseudoConsole HRESULT {result:#x}");
@@ -119,6 +115,8 @@ impl Console {
         let error = std::io::Error::last_os_error();
         unsafe {
             DeleteProcThreadAttributeList(list);
+            CloseHandle(input_read);
+            CloseHandle(output_write);
         }
         assert_ne!(created, 0, "CreateProcessW: {error}");
         unsafe {
