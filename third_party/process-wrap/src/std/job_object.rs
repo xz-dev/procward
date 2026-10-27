@@ -1,3 +1,4 @@
+// Modified for procward: pass the expected Job key to completion-port waits.
 use std::{
 	io::{Error, ErrorKind, Result},
 	os::windows::{
@@ -180,15 +181,20 @@ impl ChildWrapper for JobObjectChild {
 
 		// nevertheless, now wait and make sure we reap all children.
 		let JobPort {
-			completion_port, ..
+			job,
+			completion_port,
 		} = self.job_port;
-		let _ = wait_on_job(completion_port, None)?;
+		let _ = wait_on_job(job, completion_port, None)?;
 		Ok(status)
 	}
 
 	#[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
 	fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-		let _ = wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?;
+		let _ = wait_on_job(
+			self.job_port.job,
+			self.job_port.completion_port,
+			Some(Duration::ZERO),
+		)?;
 		self.inner.try_wait()
 	}
 }

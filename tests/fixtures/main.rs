@@ -233,6 +233,13 @@ fn main() {
                         thread::park();
                     }
                 }
+                #[cfg(windows)]
+                "job-wait" => {
+                    let _branch = spawn("branch", dir);
+                    wait_for(&dir.join("worker.pid"));
+                    wait_for(&dir.join("release"));
+                    process::exit(23);
+                }
                 "tree" => {
                     let _branch = spawn("branch", dir);
                     wait_for(&dir.join("worker.pid"));

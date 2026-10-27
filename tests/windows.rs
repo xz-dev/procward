@@ -214,3 +214,57 @@ fn console_handles_one_ctrl_c_and_break_then_response_driven_quit() {
     fs::remove_dir_all(dir).unwrap();
     assert_eq!(status.code(), Some(23), "{transcript:?}");
 }
+
+#[test]
+fn job_wait_does_not_complete_while_gated_descendants_are_alive() {
+    use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
+    use std::task::{Context, Poll, Waker};
+    let dir = std::env::temp_dir().join(format!("procward-job-wait-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut command = tokio::process::Command::new(fixture());
+        command.arg("job-wait").arg(&dir);
+        let mut job = CommandWrap::from(command)
+            .wrap(KillOnDrop)
+            .wrap(JobObject)
+            .spawn()
+            .unwrap();
+        let mut descendants = Vec::new();
+        for mode in ["branch", "worker"] {
+            let path = dir.join(format!("{mode}.pid"));
+            poll(Instant::now() + Duration::from_secs(20), || {
+                path.try_exists().unwrap()
+                    && fs::read_to_string(&path).unwrap().parse::<u32>().is_ok()
+            });
+            descendants.push(Handle::open(
+                fs::read_to_string(path).unwrap().parse().unwrap(),
+            ));
+        }
+        fs::write(dir.join("release"), b"exit primary").unwrap();
+        poll(Instant::now() + Duration::from_secs(5), || {
+            job.inner_mut().try_wait().unwrap().is_some()
+        });
+        assert!(descendants.iter().all(|handle| !handle.exited()));
+        let mut completion = job.wait();
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(completion.as_mut().poll(&mut context), Poll::Pending),
+            "Job wait completed while gated descendant process handles are still live"
+        );
+        for handle in &descendants {
+            assert_ne!(unsafe { TerminateProcess(handle.0, 0) }, 0);
+        }
+        let result = tokio::time::timeout(Duration::from_millis(7500), completion)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.code(), Some(23));
+        assert!(descendants.iter().all(Handle::exited));
+    });
+    runtime.shutdown_timeout(Duration::from_millis(50));
+    fs::remove_dir_all(dir).unwrap();
+}

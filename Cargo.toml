@@ -46,3 +46,6 @@ windows-sys = { version = "=0.61.2", default-features = false, features = ["Win3
 process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
 rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "pipe"] }
 signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
+
+[patch.crates-io]
+process-wrap = { path = "third_party/process-wrap" }

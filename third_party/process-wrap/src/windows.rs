@@ -1,16 +1,19 @@
+// Modified for procward: validate Job-empty completion, preserve deadlines and errors.
 //! Windows API support functions.
 
 use std::{
 	io::{Error, Result},
 	ops::ControlFlow,
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 #[cfg(feature = "tracing")]
 use tracing::{debug, instrument};
 use windows::{
 	Win32::{
-		Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE},
+		Foundation::{
+			CloseHandle, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+		},
 		System::{
 			Diagnostics::ToolHelp::{
 				CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
@@ -23,6 +26,7 @@ use windows::{
 				JobObjectAssociateCompletionPortInformation, JobObjectExtendedLimitInformation,
 				SetInformationJobObject, TerminateJobObject,
 			},
+			SystemServices::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO,
 			Threading::{
 				CREATE_SUSPENDED, GetProcessId, INFINITE, OpenThread, PROCESS_CREATION_FLAGS,
 				ResumeThread, THREAD_SUSPEND_RESUME,
@@ -241,31 +245,46 @@ pub(crate) fn terminate_job(job: JobHandle, exit_code: u32) -> Result<()> {
 }
 
 /// Wait for a job to complete.
+// Procward modification: require this Job's empty notification; preserve timeout and error results.
 #[cfg_attr(feature = "tracing", instrument(level = "debug"))]
 pub(crate) fn wait_on_job(
+	job: JobHandle,
 	completion_port: PortHandle,
 	timeout: Option<Duration>,
 ) -> Result<ControlFlow<()>> {
-	let mut code: u32 = 0;
-	let mut key: usize = 0;
-	let mut overlapped = OVERLAPPED::default();
-	let mut lp_overlapped = &mut overlapped as *mut OVERLAPPED;
-
-	let result = unsafe {
-		GetQueuedCompletionStatus(
-			completion_port.0,
-			&mut code,
-			&mut key,
-			&mut lp_overlapped as *mut _,
-			timeout.map_or(INFINITE, |d| d.as_millis().try_into().unwrap_or(INFINITE)),
-		)
-	};
-
-	// ignore timing out errors unless the timeout was specified to INFINITE
-	// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus
-	if timeout.is_some() && result.is_err() && lp_overlapped.is_null() {
-		return Ok(ControlFlow::Continue(()));
+	let started = Instant::now();
+	loop {
+		let mut code: u32 = 0;
+		let mut key: usize = 0;
+		let mut overlapped: *mut OVERLAPPED = std::ptr::null_mut();
+		let milliseconds = timeout.map_or(INFINITE, |limit| {
+			limit
+				.saturating_sub(started.elapsed())
+				.as_millis()
+				.min(u128::from(INFINITE - 1)) as u32
+		});
+		let result = unsafe {
+			GetQueuedCompletionStatus(
+				completion_port.0,
+				&mut code,
+				&mut key,
+				&mut overlapped,
+				milliseconds,
+			)
+		};
+		match result {
+			Ok(()) if key == job.0.0 as usize && code == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {
+				return Ok(ControlFlow::Break(()));
+			}
+			Ok(()) => {}
+			Err(error)
+				if timeout.is_some()
+					&& overlapped.is_null()
+					&& error.code() == HRESULT::from_win32(WAIT_TIMEOUT.0) => {}
+			Err(error) => return Err(Error::other(error)),
+		}
+		if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+			return Ok(ControlFlow::Continue(()));
+		}
 	}
-
-	Ok(ControlFlow::Break(()))
 }

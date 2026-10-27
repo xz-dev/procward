@@ -1,3 +1,4 @@
+// Modified for procward: pass the expected Job key to completion-port waits.
 use std::{
 	future::Future,
 	io::{Error, ErrorKind, Result},
@@ -189,7 +190,13 @@ impl ChildWrapper for JobObjectChild {
 
 			// nevertheless, now try reaping all children a few times...
 			for _ in 1..MAX_RETRY_ATTEMPT {
-				if wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?.is_break() {
+				if wait_on_job(
+					self.job_port.job,
+					self.job_port.completion_port,
+					Some(Duration::ZERO),
+				)?
+				.is_break()
+				{
 					return Ok(status);
 				}
 			}
@@ -197,16 +204,21 @@ impl ChildWrapper for JobObjectChild {
 			// ...finally, if there are some that are still alive,
 			// block in the background to reap them fully.
 			let JobPort {
-				completion_port, ..
+				job,
+				completion_port,
 			} = self.job_port;
-			let _ = spawn_blocking(move || wait_on_job(completion_port, None)).await??;
+			let _ = spawn_blocking(move || wait_on_job(job, completion_port, None)).await??;
 			Ok(status)
 		})
 	}
 
 	#[cfg_attr(feature = "tracing", instrument(level = "debug", skip(self)))]
 	fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-		let _ = wait_on_job(self.job_port.completion_port, Some(Duration::ZERO))?;
+		let _ = wait_on_job(
+			self.job_port.job,
+			self.job_port.completion_port,
+			Some(Duration::ZERO),
+		)?;
 		self.inner.try_wait()
 	}
 }
