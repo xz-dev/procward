@@ -1,4 +1,19 @@
-# Developing the Linux walking skeleton
+# Development
+
+## Early CI
+
+Repository metadata verified with `gh repo view --json url,description,repositoryTopics`:
+canonical URL `https://github.com/xz-dev/procward`, exact design description and all
+13 topics. First full matrix: commit `bec61c5`, run `40523401056`.
+
+Every push and pull request runs all ten native/guest target rows, including
+documentation-only events. No event cancellation, path filters or fail-fast.
+An unimplemented backend executes the real exit fixture and reports
+`BACKEND INCOMPLETE (expected-unsupported during early development, NOT release coverage)`
+as a failing test, never as a passing release result. Normal reruns retain Actions
+attempt history. GNU x64 also checks declared Rust 1.87 MSRV.
+
+## Linux walking skeleton
 
 This checkout implements change `extract-procward-core`, tasks 1.1–1.4 only.
 It is not a complete v0.1.0 release: detached-tree ownership, independent
