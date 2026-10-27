@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::linux_inventory::Inventory;
+use crate::inventory::Inventory;
 use rustix::{
     fd::{AsRawFd, FromRawFd, OwnedFd},
     io::{self as rio, Errno, FdFlags},
@@ -20,7 +20,7 @@ use std::{
 };
 
 pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
-    process::set_child_subreaper(Some(Pid::INIT))?;
+    crate::reaper::acquire()?;
     let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
     let (read, write) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
     let expected = process::getpid();
@@ -49,7 +49,7 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
         if let Some(status) = anchor.try_wait()? {
             drop(write);
             // Anchor loss is fatal even when it occurred before publishing any primary result.
-            let cleanup = crate::linux::cleanup(
+            let cleanup = crate::reaper::cleanup(
                 &mut Inventory::new(),
                 None,
                 &mut None,
@@ -106,7 +106,7 @@ pub fn anchor(args: &[OsString]) -> io::Result<u8> {
     if !alive(&lease)? || process::getppid() != Some(parent) {
         return Err(io::Error::other("owner lost before payload launch"));
     }
-    crate::linux::run_owned(command, rest, &lease)
+    crate::reaper::run_owned(command, rest, &lease)
 }
 
 pub fn alive(lease: impl rustix::fd::AsFd) -> io::Result<bool> {

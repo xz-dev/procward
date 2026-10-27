@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use crate::{
-    linux_inventory::{Inventory, children},
+    inventory::{Inventory, children},
     policy::{Phase, Policy},
 };
 use process_wrap::std::{CommandWrap, ProcessGroup};
@@ -14,20 +14,36 @@ use signal_hook::{
 };
 use std::{
     ffi::{OsStr, OsString},
-    fs, io,
+    io,
     process::Command,
     thread,
     time::{Duration, Instant},
 };
+
+pub fn acquire() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    process::set_child_subreaper(Some(Pid::INIT))?;
+    #[cfg(target_os = "freebsd")]
+    {
+        process::set_reaper_status(true)?;
+        if !process::get_reaper_status(None)?
+            .flags
+            .contains(process::ReaperStatusFlags::OWNED)
+        {
+            return Err(io::Error::other("required FreeBSD reaper was not acquired"));
+        }
+    }
+    Ok(())
+}
 
 pub fn run_owned(
     command: &OsStr,
     args: &[OsString],
     lease: &rustix::fd::OwnedFd,
 ) -> io::Result<u8> {
-    process::set_child_subreaper(Some(Pid::INIT))?;
+    acquire()?;
     let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
-    fs::read_to_string("/proc/thread-self/children")?;
+    children()?;
     let mut command = Command::new(command);
     command.args(args);
     if !crate::owner::alive(lease)? {

@@ -33,14 +33,14 @@ fn main() {
             let dir = Path::new(&args[2]);
             fs::write(dir.join(format!("{mode}.pid")), process::id().to_string()).unwrap();
             match mode {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "cleanup-order" => {
                     let _worker = spawn("order-worker", dir);
                     wait_for(&dir.join("order-ready"));
                     wait_for_input();
                     process::exit(23);
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "order-worker" => {
                     use std::sync::{
                         Arc,
@@ -76,7 +76,7 @@ fn main() {
                         thread::park_timeout(Duration::from_millis(5));
                     }
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "stubborn" => {
                     signal_hook::flag::register(
                         signal_hook::consts::SIGTERM,
@@ -88,19 +88,21 @@ fn main() {
                         thread::park();
                     }
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "detached-tree" => {
                     let _branch = spawn("detached-branch", dir);
                     wait_for(&dir.join("stopped-worker.pid"));
                     wait_for_input();
                     process::exit(23);
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "detached-branch" => {
+                    #[cfg(target_os = "freebsd")]
+                    rustix::process::set_reaper_status(true).unwrap();
                     rustix::process::setsid().unwrap();
                     spawn("stopped-worker", dir).wait().unwrap();
                 }
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 "stopped-worker" => {
                     rustix::process::kill_process(
                         rustix::process::getpid(),

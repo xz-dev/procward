@@ -16,11 +16,15 @@ path = "tests/cli.rs"
 name = "platform"
 path = "tests/platform.rs"
 
+[[test]]
+name = "freebsd"
+path = "tests/freebsd.rs"
+
 [[example]]
 name = "fixture"
 path = "tests/fixtures/main.rs"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
 rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "pipe"] }
 signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
