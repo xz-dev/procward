@@ -38,7 +38,7 @@ Fixtures SHALL cover startup/owner-loss races, stopped/detached descendants, liv
 - **THEN** tests observe reaping during healthy operation, not only eventual disappearance at shutdown
 
 ### Requirement: Preserve deadline assertions and report rescue honestly
-Fault tests SHALL measure at most 8 seconds from injection to platform completion, with the specified 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Startup/emulation time SHALL not relax fault deadlines. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
+Fault tests SHALL measure at most 8 seconds from injection to platform completion with default settings, with default 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Non-default policy/failover tests SHALL enforce the original configured deadline from first cleanup start, not restart timing when a native role dies. Startup/emulation time SHALL not relax fault deadlines. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
 
 #### Scenario: Slow runner reaches startup late
 - **WHEN** readiness consumes a larger setup budget before the fault

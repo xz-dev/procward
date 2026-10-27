@@ -1,85 +1,151 @@
 # Development
 
-## Early CI
-
-Repository metadata verified with `gh repo view --json url,description,repositoryTopics`:
-canonical URL `https://github.com/xz-dev/procward`, exact design description and all
-13 topics. First full matrix: commit `bec61c5`, run `40523401056`.
-
-Every push and pull request runs all ten native/guest target rows, including
-documentation-only events. No event cancellation, path filters or fail-fast.
-An unimplemented backend executes the real exit fixture and reports
-`BACKEND INCOMPLETE (expected-unsupported during early development, NOT release coverage)`
-as a failing test, never as a passing release result. Normal reruns retain Actions
-attempt history. GNU x64 also checks declared Rust 1.87 MSRV.
-
-## Linux walking skeleton
-
-This checkout implements change `extract-procward-core`, tasks 1.1–1.4 only.
-It is not a complete v0.1.0 release: detached-tree ownership, independent
-owner-death cleanup, graceful TERM/CONT deadlines, interactive job control and
-non-Linux backends remain later tasks. Current primary-exit cleanup immediately
-KILLs the ordinary process group and reaps until no children remain; a remaining
-child at the 7.5-second completion cap is an error, not cleanup success.
-TERM/INT/HUP are forwarded during healthy work, but a primary that ignores them
-still needs the later bounded shutdown policy.
+This checkout implements the noninteractive lifecycle/platform slice of change
+`extract-procward-core`. It is not a complete v0.1.0 release: Unix terminal job
+control, application handoff/task control, final documentation and release setup
+remain later tasks. No tests launch pi or use pi-env source/fixtures.
 
 ## Build and checks
 
-Use the host's default stable toolchain and normal Cargo cache:
-
 ```sh
-cargo check --locked
-cargo test
-cargo clippy -- -D warnings
-cargo clippy --all-targets -- -D warnings
+cargo build --locked --bins --examples
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The manifest declares Rust 1.87, satisfying process-wrap 10.0.1's MSRV. Cargo's
-resolver selected the checked lockfile for that declaration; all dependency
-MSRVs declared in Cargo metadata are at most 1.87 (`cfg_aliases` declares none).
-This slice was compiled and tested with host stable Rust 1.99.1. A Rust 1.87
-compiler run is not claimed here; add that compiler to ordinary CI in section 2.
+Build binaries and examples explicitly before focused or `--all-targets` tests:
+the example's test harness is not its executable image, and the native Darwin
+observer test launches the real procward binary. The example `fixture` is
+test-only, not an installed binary. Cargo declares Rust 1.87 (process-wrap 10's MSRV); GNU x64
+CI installs that compiler and checks all Linux targets alongside stable runtime
+tests. The lockfile includes target-specific dependency resolution.
 
-## Fixtures and execution context
+## Runtime fixtures
 
-`tests/fixtures/main.rs` is a fresh, standard-library-only fixture, built as the
-Cargo example `fixture` so it is not an installed production binary. Normal
-`cargo test` builds it automatically. For focused runs, build it explicitly:
+Linux fixtures cover native argv/cwd/environment/stdio/status, rejected startup,
+exec failures without shell fallback, healthy adopted-orphan reaping, unrelated
+work, detached/stopped descendants, stale pidfds, launch-gate EOF/stale parents,
+owner/anchor loss and targeted wake. Stable handles and observable file/input
+responses sequence actions; polling has fixed deadlines, not readiness sleeps.
+Tests distinguish stopped, zombie, gone and query failure. The stale-pidfd test
+checks stable-handle safety; it does not force numeric PID reuse in the kernel.
+
+FreeBSD guest fixtures exercise nested reapers, stopped adoption, healthy orphan
+reaping, targeted parent-death SIGCONT and kernel query errors. Windows fixtures
+check kill-on-close Job membership at payload startup, launch restrictions,
+owner termination without destructors, primary versus Job completion, native
+32-bit results, console Ctrl-C/Break and real ConPTY readiness/quit exchanges.
+Darwin tests cover retained identity after setsid/reparenting, denied identity
+queries, birth/UID/PID mismatches, owner loss, a native explicitly inventoried
+observer-loss fallback and a separately rescued pre-observation escape
+demonstration. The CLI early-observer-loss case asserts failure 125 and the
+published limitation; any survivors are labelled test harness cleanup, not
+product cleanup. PID-file readiness does not establish observation. Darwin
+completion is best-effort.
+
+With defaults, Linux/FreeBSD use one immutable cleanup policy: TERM then one CONT
+per newly adopted child during grace, KILL afterwards, no late rescue CONT and a
+7.5-second cap.
+EOF-first selects 6 seconds. Only already-saved fatal helper status selects 3.
+Tiny deterministic policy tests check exact boundaries; runtime ignoring-TERM
+and stopped-adoption fixtures preserve the default fault-relative 8-second assertion.
+Cleanup is generic/configurable: `--grace 6s --fatal-grace 3s
+--cleanup-deadline 7500ms` are defaults, with validation described in
+[platforms.md](platforms.md). A one-shot private CLOEXEC record publishes the
+system-wide monotonic start/selection before cleanup actions so outer fallback
+cannot restart either configured grace or deadline. The non-default late-loss
+fixture uses 2s/1s/2500ms; discarding the record made its negative control fail at
+2.821 seconds. Loss before publication is a separate checked case.
+
+Linux runs from this agent use task-owned `pw-*` tmux sessions outside the
+installed pi subreaper. The existing server has PPID 1; no `wakeup` session was
+modified. Example:
 
 ```sh
-cargo test --test cli --example fixture healthy_primary_does_not_retain_adopted_zombies
+tmux new-session -d -s pw-tests \
+  'cd /path/to/procward; cargo build --locked --bins --examples && cargo test --locked --all-targets > /tmp/pw-tests.log 2>&1; echo $? > /tmp/pw-tests.status'
 ```
 
-The CLI tests assert native argv (including empty/non-UTF-8 values), cwd,
-environment, separate stdio streams, exit/signal results, ordinary-tree cleanup,
-unrelated-work survival, healthy orphan reaping and rejected startup/exec.
-Input and file gates sequence the fixtures. Polls observe state until fixed
-deadlines; no elapsed sleep substitutes for readiness. `/proc` absence alone
-means gone: stopped processes and zombies still count as present, and query
-errors fail.
+Test-only rescue is explicit, identity-safe and leaves failed runs failed.
+Pipe drain and child exit are observed separately with deadlines, so a dead
+shell-facing owner cannot hide a stopped helper holding output open. Negative
+controls disabled detached cleanup, replaced the parent-death CONT wake, and
+omitted cleanup CONT; corresponding fresh fixtures failed. Restored code passed.
+An early negative-control attempt exposed an unbounded test pipe drain and
+required separately logged manual rescue; that harness was fixed, then its
+negative control failed cleanly on deadline and reported its own rescue.
+A child-only Linux seccomp filter also denies PR_SET_PDEATHSIG to verify required
+wake setup refuses payload execution. Omitting arming made that new negative
+control fail with payload status 0 instead of 125; the syscall was restored.
 
-Tests ran in the task-owned tmux session `pw-apply1`, whose existing tmux server
-had PPID 1, outside the installed pi process-owner ancestry. No `wakeup` session
-was modified. To reproduce from an agent with a subreaper ancestor, use your own
-tmux session and capture its exit status and output:
+## Every-event CI and normal reruns
 
-```sh
-tmux new-session -d -s procward-tests \
-  'cd /path/to/procward; cargo test > /tmp/procward-tests.log 2>&1; echo $? > /tmp/procward-tests.status'
-```
+Repository metadata was verified with
+`gh repo view --json url,description,repositoryTopics`: canonical URL
+`https://github.com/xz-dev/procward`, exact design description and all 13 topics.
+No settings, tags or releases were changed during backend implementation.
 
-The test process also enables its own subreaper solely for failed-run rescue.
-Known gated fixtures get pidfds; rescue signals use those handles, not stale
-numeric PIDs. If rescue is needed, output identifies it and the run stays
-failed. Nested procward processes remain responsible for normal orphan reaping;
-tests require the orphan's live PPID to match procward before releasing it.
-Negative controls were run with healthy reaping disabled and with group KILL
-replaced by a non-terminating signal. The respective orphan/tree tests failed,
-reported rescue honestly, and the test subreaper reaped rescued fixtures. Both
-mutations were restored before the final passing suite.
+All pushes and pull requests run ten rows: GNU/musl Linux x64/arm64, FreeBSD
+x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. No path/branch filters,
+fail-fast or newer-event cancellation. Actual source SHA, executor, compiler host
+and fixture results appear in ordinary logs. Alpine's `*-alpine-linux-musl`
+vendor alias maps to its native `*-unknown-linux-musl` row label.
 
-Nothing in this suite launches pi, needs model credentials, or uses pi-env
-implementation/test/fixture source. Tests are Linux-only for this slice; their
-absence on another platform is not release coverage.
+Early unimplemented backends ran the fixture assertion and reported
+`BACKEND INCOMPLETE (expected-unsupported during early development, NOT release coverage)`
+as red, never a fake release pass. Initial full matrix: `bec61c5`, run
+`40523401056`; docs-only event: `db91523`, run `40523519264`. Ordinary failed-job
+rerun of the first run retained attempt 1 logs. A genuine fixture-publication
+race occurred in GNU x64 at `b6fde08`, run `40528359033`: forced KILL could catch
+`fs::write` after truncate. Its ordinary job rerun kept the old source/assertions;
+fix-forward `c98a0c4` publishes the observation with atomic rename instead.
+GNU x64 attempt 2 passed with old source/assertions, confirming normal flaky-job
+reruns work without deleting attempt 1. One historical macOS arm64 row was not
+acquired by a hosted runner (GitHub annotations cite capacity constraints), not
+cancelled by matrix/new-event policy; current required rows are watched/rerun
+normally until complete.
+
+## Narrow dependency fixes
+
+The real fixtures found two upstream bugs, handled through separately committed
+pristine vendors and minimal documented patches, not new OS implementations:
+
+- process-wrap 10.0.1 returned Job completion after any completion packet.
+  Pristine deterministic regression: run `40532870970`, both Windows arches red;
+  fix `44ed740` waits for this Job's ACTIVE_PROCESS_ZERO and propagates errors.
+- rustix 1.1.6 converted FreeBSD's no-failed-PID sentinel -1 as a positive Pid.
+  Pristine corrected regression: run `40536071916`; fix `ebdb103` maps the
+  sentinel to None. No procctl shim or disabled assertion.
+
+See `third_party/*/PROCWARD-PATCH.md` and their unfiled `UPSTREAM.md` reports/diffs.
+Remote regression branches were deleted after recording red evidence; source
+commits and ordinary Actions logs remain attributable. No upstream issue/PR was
+filed. Parent/user approval is needed before filing, and vendors should be
+removed once upstream ships fixes. Original licences and modification notices
+are preserved; [licensing.md](licensing.md) lists all 64 locked crate/versions.
+
+## Section 2–3 checkpoint
+
+Code commit `eb8ca7d`: [run 40545740279](https://github.com/xz-dev/procward/actions/runs/40545740279)
+completed **success on all ten rows**, with real fixture execution:
+
+| Runtime target | Result |
+| --- | --- |
+| x86_64-unknown-linux-gnu | success, including Rust 1.87 check |
+| aarch64-unknown-linux-gnu | success |
+| x86_64-unknown-linux-musl | success |
+| aarch64-unknown-linux-musl | success |
+| x86_64-unknown-freebsd | success, FreeBSD 14.3 guest |
+| aarch64-unknown-freebsd | success, FreeBSD 14.3 guest |
+| x86_64-apple-darwin | success |
+| aarch64-apple-darwin | success |
+| x86_64-pc-windows-msvc | success, console and ConPTY |
+| aarch64-pc-windows-msvc | success, console and ConPTY |
+
+This is an ordinary development checkpoint, not release acceptance or a sealed
+artifact packet. Subsequent documentation-only pushes still run the full matrix.
+Tasks 1–3 are complete (14/34); sections 4–7 remain, including interactive Unix
+job control, application/task contracts, release setup/review, owner-controlled
+release prerequisites and later pi integration. No tag, release, repository
+setting or pi/pi-env code was changed in this slice.

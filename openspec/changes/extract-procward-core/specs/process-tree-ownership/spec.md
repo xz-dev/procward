@@ -38,15 +38,28 @@ Procward MUST NOT signal unrelated processes through stale PIDs/PGIDs. Nondirect
 - **THEN** cleanup reports the failure rather than declaring the target gone
 
 ### Requirement: Keep teardown bounded and ordered
-Unix cleanup SHALL deliver TERM before any teardown CONT to a stopped target, then escalate to KILL at the selected grace boundary. Linux/FreeBSD abnormal-owner cleanup SHALL allow 6 seconds, or 3 seconds only when an already saved helper wait status proves fatal signal termination at selection, within one 7.5-second cleanup deadline. EOF alone SHALL NOT select the fatal-only grace. Adoption and later status discovery SHALL NOT restart grace/deadline, and no rescue CONT SHALL occur after that policy permits it or repeatedly during active shutdown. Native fault teardown SHALL complete within 8 seconds of fault injection in acceptance tests.
+Unix cleanup SHALL deliver TERM before any teardown CONT to a stopped target, then escalate to KILL at the selected grace boundary. `procward run` SHALL accept `--grace <dur>`, `--fatal-grace <dur>` and `--cleanup-deadline <dur>`, with defaults 6 seconds, 3 seconds and 7.5 seconds respectively; durations use integer `ms` or `s` suffixes. Startup SHALL validate `0 < fatal-grace <= grace < cleanup-deadline`; invalid durations/order SHALL return 2 before payload execution. Linux/FreeBSD abnormal-owner cleanup SHALL select configured ordinary grace, or configured fatal grace only when an already saved helper wait status proves fatal signal termination at selection. EOF alone SHALL NOT select fatal grace. One system-wide monotonic start and selected policy SHALL govern the owned tree across native-role failover: adoption, role loss and later status discovery SHALL NOT restart or extend grace/deadline. No rescue CONT SHALL occur after that policy permits it or repeatedly during active shutdown. With default timings, native fault teardown SHALL complete within 8 seconds of fault injection in acceptance tests; non-default failover tests SHALL enforce the original configured cleanup deadline, not a replacement role-relative budget.
 
 #### Scenario: Fatal helper status is already known
 - **WHEN** cleanup selects policy with a saved signalled helper status
-- **THEN** it selects the 3-second grace, delivers TERM before permitted CONT and retains the original 7.5-second deadline
+- **THEN** it selects configured fatal grace (3 seconds by default), delivers TERM before permitted CONT and retains the original configured cleanup deadline (7.5 seconds by default)
 
 #### Scenario: EOF precedes waitable exit
 - **WHEN** cleanup begins on EOF before fatal helper status is available
-- **THEN** it selects the ordinary 6-second grace and does not reselect it when status later arrives
+- **THEN** it selects configured ordinary grace (6 seconds by default) and does not reselect it when status later arrives
+
+#### Scenario: Native role dies during active cleanup
+- **WHEN** the anchor publishes the original monotonic cleanup start/policy and then dies while cleanup is already active
+- **THEN** the surviving owner uses only the remaining original budget, retaining selected grace and going directly to KILL if grace already elapsed
+- **AND** the private one-shot policy record is separate from application/lease transports and never inherited by the payload
+
+#### Scenario: Anchor dies before policy publication
+- **WHEN** an anchor dies without having started/published cleanup
+- **THEN** the surviving owner selects its first policy from that fault observation rather than inventing a prior start
+
+#### Scenario: Cleanup timings are invalid
+- **WHEN** durations are malformed, missing, duplicated or violate `0 < fatal-grace <= grace < cleanup-deadline`
+- **THEN** procward returns 2 and no payload side effect occurs
 
 #### Scenario: Adoption occurs after grace
 - **WHEN** a stopped descendant is adopted after the selected grace expires

@@ -104,7 +104,7 @@ This walking skeleton immediately KILLs the ordinary process group on primary ex
 
 **Owner-loss extension:** add a small private same-binary native helper/liveness channel before claiming crash containment. Kernel reapers/pidfds/Jobs provide authority; a runnable independent cleanup role provides progress when an ordinary owner dies. Where paused or double ordinary-owner loss needs another anchor, add the smallest independent native observer/reaper role demonstrated by the fault fixtures. Native cleanup roles stay outside the frozen workload; Linux/FreeBSD ancestors retain a reaper domain, and macOS retains an observer. Do not mirror pi-env's carrier/guardian/backup structure by default or count a destructor as death handling. If every independent cleanup role is killed, recovery is outside the documented guarantee.
 
-Drive one monotonic cleanup deadline. Deliver TERM before permitted teardown CONT, then KILL; on Linux/FreeBSD use 6 seconds for abnormal owner loss, 3 only when saved fatal helper wait status is already known at selection, inside 7.5 seconds. EOF-first remains 6 seconds even if fatal status arrives later. Adoption does not restart policy. Healthy reaping never consumes the saved primary result. Test boundary decisions with a tiny injectable clock/OS seam only where deterministic tests need it; do not reproduce a general scheduler abstraction.
+Drive one **global per-tree** monotonic cleanup deadline. `run --grace <dur>`, `--fatal-grace <dur>` and `--cleanup-deadline <dur>` are generic options, with defaults 6s/3s/7500ms and validation `0 < fatal-grace <= grace < cleanup-deadline` before payload; invalid timing inputs return 2. Pi will pass its selected values through these options during section 7. Deliver TERM before permitted teardown CONT, then KILL. On Linux/FreeBSD select configured ordinary grace for abnormal owner loss, or configured fatal grace only when saved fatal helper wait status is already known at selection. EOF-first never reselects later. Adoption and native-role failover do not restart either grace or deadline. Test exact default/configured boundaries with the small policy seam.
 
 **Section 3 implementation notes:** Linux now retains birth-checked pidfds for
 unreaped direct/adopted children. Kernel reaper ancestry is the authority for
@@ -133,6 +133,56 @@ builds the example's test harness, not its runnable fixture image, so CI explici
 builds examples first. Alpine's native compiler reports `*-alpine-linux-musl`;
 the row maps that vendor alias to the required `*-unknown-linux-musl` label while
 printing actual rustc host and executing native musl fixtures.
+
+**Backend/runtime corrections:** FreeBSD reaper acquisition is process-scoped and
+returns EBUSY on a second acquisition; the test rescue reaper is acquired once,
+not once per scenario. The native x64/arm64 guest lifecycle rows passed after
+that fix. Windows Job tests passed on x64/arm64 using Tokio's actual kill-on-close
+combination, including native u32 results and owner termination. Job completion
+waits are bounded; runtime shutdown also has a bound so a completion-port
+blocking task cannot make timeout handling hang during runtime destruction.
+
+macOS has no `pipe2`/rustix `pipe_with`, so its single-threaded startup uses a
+pipe followed by explicit CLOEXEC and NONBLOCK fcntls before any child spawn.
+Both ordinary owner and independent observer retain observations for failover;
+no parent-death syscall is claimed there. Credential comparison includes
+effective, real and saved UIDs alongside PID and microsecond birth time.
+
+The new ConPTY harness must establish virtual-console stdio in its attached
+fixture child: a CreateProcess from a redirected test host retained that host's
+stdio instead of providing the intended virtual terminal streams. A tiny
+fixture-only bootstrap opens CONIN$/CONOUT$ in the attached context, then launches
+procward with those handles. Production continues to preserve inherited stdio,
+including intentional redirection. Communication ends stay open through native
+process creation and output drains independently, as Microsoft documents.
+
+A shutdown-observation fixture race (KILL between truncate and write) was fixed
+with atomic rename, not relaxed predicates or deadlines. Its old-source flaky
+job was rerun normally with both attempts retained.
+
+**Global-policy audit correction (supervisor-approved):** a final audit found that independent per-role Policy construction could restart grace after late anchor loss. The anchor now atomically publishes one fixed private record before cleanup actions: CLOCK_MONOTONIC start plus configured grace/fatal/deadline and the already-selected classification. The outer owner retains it and drains it after anchor exit before fallback. The record travels on a separate CLOEXEC pipe, never the application transport and never into payload exec. An anchor that dies before publication has not started cleanup, so outer selects its first policy at fault observation. A non-default 2s/1s/2500ms, response-gated late-anchor-loss fixture enforces the original configured budget; its negative control (discarding the record) failed at 2.821 seconds. No default 8-second fault assertion was relaxed.
+
+**Verified dependency gaps (supervisor-approved):** process-wrap 10.0.1's shared Windows wait returned on any completion packet, not matching Job ACTIVE_PROCESS_ZERO. Pristine source was committed before a minimal vendored completion fix, with red/green standalone regression, preserved licences and an unfiled upstream patch/report. rustix 1.1.6 likewise passed FreeBSD's successful `rk_fpid = -1` sentinel to Pid::from_raw; a separate pristine vendor and one-field conversion fix retain its original terms and prepare, but do not file, an upstream report. These are third-party crate modifications, not copied pi-env code or new Job/procctl implementations. See third_party/*/PROCWARD-PATCH.md and docs/licensing.md. No newer rustix release/upstream main fix was available when checked by parent.
+
+libproc 0.14.11 also checks stale errno on a valid empty child-list result; macOS clears errno immediately before that query, preserving actual returned errors. BSDInfo may be unavailable with ESRCH while the PID still exists in an exiting/zombie transition: those observations remain unknown completion blockers without signal authority and are retried within the same deadline. Real denied/other queries fail; no failed query counts as absence. FreeBSD reaper KILL's ESRCH is accepted only after a fresh kernel list proves no signalable member remains; waits still establish completion, and live/denied/unknown states remain failures.
+
+**Final native audit corrections:** FreeBSD pipe(2) anonymous endpoints are
+bidirectional, so FIFO endpoints with zero link count may legitimately report
+O_RDWR; other platforms retain exact RDONLY/WRONLY validation and non-pipe fds
+are rejected. Native endpoint tests cover that distinction. Darwin waitid can
+produce empty/nonterminal notifications with WNOHANG: only a genuine exited or
+signalled status supplies primary result, while stopped/continued work retains
+ownership.
+
+A fixture's PID file never proves an independent observer already inventoried
+it. The Darwin CLI observer-loss case now checks fail-closed 125 plus explicit
+pre-observation disclosure, with separately labelled harness cleanup of any test
+survivors. A native test primes the real retained inventory before killing its
+observer and exercises the same production fallback function, requiring cleanup
+without rescue and the defined failure status. This tests the observed-tree
+contract without a fake readiness delay, a test-only product flag or a new
+startup protocol. Real child-owning native cases are sequential so inventories
+do not accidentally own another test's fixtures.
 
 **Interactive extension:** direct groups alone do not prevent a physical tty background syscall from stopping application progress after shell reclaim. The behavioural reference documents this real failure, so interactive isolation is justified for the preserved terminal/cleanup guarantee, not for ordinary pipe execution. Add a focused Unix private PTY path only in this slice, using rustix-openpty if it reduces correct code. Keep physical authority with runnable native roles in the caller session; primary input/output uses the private terminal, redirected stderr remains unchanged, and fatal draining cannot wait on stopped output. The own code is grant/stop/resume/restore/relay coordination, not another PTY implementation. Preserve normal output; fatal cleanup may discard it. If a simpler direct-handoff path passes every adversarial authority/blocked-IO fixture, prefer it instead; externally required behaviour and task coverage do not change.
 

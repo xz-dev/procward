@@ -48,6 +48,15 @@ macOS SHALL retain observed process identities across reparenting and validate P
 - **WHEN** a required observer dies while normal owners remain
 - **THEN** the session fails closed rather than silently running without its cleanup anchor
 
+#### Scenario: Observer dies before the outer inventory's first sweep
+- **WHEN** observer loss reparents a descendant before the surviving owner ever observed its identity
+- **THEN** procward reports failure 125 and the explicit pre-observation best-effort limitation
+- **AND** a fixture may clean known test PIDs separately as labelled harness cleanup, without crediting product containment
+
+#### Scenario: Observed inventory survives observer loss
+- **WHEN** a native test establishes retained identities before killing its observer
+- **THEN** the same production fallback path cleans those observed identities and returns the defined failure status without harness rescue
+
 ### Requirement: Establish Windows Job containment before payload work
 Windows SHALL assign the command to a non-inheritable kill-on-last-handle-close Job before untrusted payload work. Dropping/killing an owner SHALL not leave a leaked Job handle that keeps descendants alive. Normal cleanup SHALL confirm Job completion; Unix process-group assumptions SHALL NOT substitute for this guarantee.
 
