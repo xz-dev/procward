@@ -17,7 +17,7 @@ unsafe extern "system" fn console_control(event: u32) -> i32 {
     1
 }
 
-pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u32> {
+pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) -> io::Result<u32> {
     if unsafe { SetConsoleCtrlHandler(Some(console_control), 1) } == 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32)
@@ -46,7 +46,7 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u32> {
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
         child.start_kill()?;
-        tokio::time::timeout(Duration::from_millis(7500), child.wait())
+        tokio::time::timeout(config.deadline, child.wait())
             .await
             .map_err(|_| io::Error::other("Job completion deadline expired"))??;
         Ok(status

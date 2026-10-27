@@ -572,25 +572,35 @@ fn launch_gate_eof_and_failed_parent_recheck_deny_payload() {
         )
         .unwrap();
         let raw = read.as_raw_fd();
+        let (_notice, publish) = rustix::pipe::pipe_with(
+            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+        )
+        .unwrap();
+        let policy_raw = publish.as_raw_fd();
         let mut cmd = command();
         cmd.arg("__anchor")
             .arg(if stale_parent { 1 } else { std::process::id() }.to_string())
             .arg(raw.to_string())
+            .arg(policy_raw.to_string())
+            .args(["6000", "3000", "7500"])
             .arg(fixture())
             .arg("touch")
             .arg(&marker);
         unsafe {
             cmd.pre_exec(move || {
-                rustix::io::fcntl_setfd(
-                    rustix::fd::BorrowedFd::borrow_raw(raw),
-                    rustix::io::FdFlags::empty(),
-                )?;
+                for fd in [raw, policy_raw] {
+                    rustix::io::fcntl_setfd(
+                        rustix::fd::BorrowedFd::borrow_raw(fd),
+                        rustix::io::FdFlags::empty(),
+                    )?;
+                }
                 Ok(())
             });
         }
         let mut run = Run::start(cmd);
         drop(read);
         drop(write);
+        drop(publish);
         let output = run.finish();
         assert_eq!(output.status.code(), Some(125), "{output:?}");
         assert!(!marker.try_exists().unwrap());
@@ -745,4 +755,65 @@ fn denied_parent_death_wake_refuses_payload_before_side_effects() {
         String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
         "{output:?}"
     );
+}
+
+#[test]
+fn anchor_failover_preserves_configured_policy_or_starts_one_only_before_publication() {
+    for after_publication in [true, false] {
+        let dir = Scratch::new();
+        let mut cmd = command();
+        cmd.args([
+            "run",
+            "--grace",
+            "2s",
+            "--fatal-grace",
+            "1s",
+            "--cleanup-deadline",
+            "2500ms",
+            "--",
+        ])
+        .arg(fixture())
+        .arg("deadline-failover")
+        .arg(&dir.0);
+        let mut run = Run::start(cmd);
+        let primary = run.remember(&dir.0, "deadline-failover");
+        poll(|| dir.0.join("ready").try_exists().unwrap());
+        let anchor_pid = fs::read_to_string(format!("/proc/{primary}/status"))
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("PPid:\t")
+                    .and_then(|text| text.parse::<i32>().ok())
+            })
+            .unwrap();
+        let anchor = pidfd_open(Pid::from_raw(anchor_pid).unwrap(), PidfdFlags::empty()).unwrap();
+        let owner = pidfd_open(
+            Pid::from_raw(run.child.as_ref().unwrap().id() as i32).unwrap(),
+            PidfdFlags::empty(),
+        )
+        .unwrap();
+        let original = Instant::now();
+        if after_publication {
+            pidfd_send_signal(&owner, Signal::TERM).unwrap();
+            poll(|| dir.0.join("cleanup-start").try_exists().unwrap());
+            poll(|| dir.0.join("late-cleanup").try_exists().unwrap());
+        } else {
+            assert!(!dir.0.join("cleanup-start").try_exists().unwrap());
+        }
+        pidfd_send_signal(&anchor, Signal::KILL).unwrap();
+        let output = run.finish();
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        assert!(absent(primary));
+        assert!(
+            original.elapsed() <= Duration::from_millis(2500),
+            "role loss restarted original configured deadline: {:?}",
+            original.elapsed()
+        );
+        if !after_publication {
+            assert!(
+                original.elapsed() >= Duration::from_secs(1),
+                "saved fatal status must select configured fatal grace"
+            );
+        }
+    }
 }

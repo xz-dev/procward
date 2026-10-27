@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use std::{env, ffi::OsString, process::ExitCode};
-
+mod config;
 #[cfg(target_os = "linux")]
 #[path = "linux_inventory.rs"]
 mod inventory;
@@ -19,8 +19,7 @@ mod reaper;
 #[cfg(windows)]
 mod windows;
 
-const USAGE: &str = "procward 0.1.0\n\nUsage: procward run -- <command> [args...]\n       procward --help\n       procward --version\n\nNoninteractive development build; interactive job control is not yet supported.";
-
+const USAGE: &str = "procward 0.1.0\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nNoninteractive development build; interactive Unix job control is not yet supported.";
 fn main() -> ExitCode {
     match cli(env::args_os().skip(1).collect()) {
         Ok(code) => {
@@ -29,14 +28,13 @@ fn main() -> ExitCode {
             #[cfg(not(windows))]
             ExitCode::from(code as u8)
         }
-        Err(message) => {
+        Err((code, message)) => {
             eprintln!("procward: {message}");
-            ExitCode::from(125)
+            ExitCode::from(code)
         }
     }
 }
-
-fn cli(args: Vec<OsString>) -> Result<u32, String> {
+fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
     match args.as_slice() {
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{USAGE}");
@@ -49,16 +47,21 @@ fn cli(args: Vec<OsString>) -> Result<u32, String> {
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         [role, rest @ ..] if role == "__anchor" => owner::anchor(rest)
             .map(u32::from)
-            .map_err(|error| error.to_string()),
-        [run, separator, command, rest @ ..]
-            if run == "run" && separator == "--" && !command.is_empty() =>
-        {
+            .map_err(|error| (125, error.to_string())),
+        [run, options @ ..] if run == "run" => {
+            let (config, index) = config::options(options)?;
+            let [command, rest @ ..] = &options[index..] else {
+                return Err((125, "missing command after --".into()));
+            };
+            if command.is_empty() {
+                return Err((125, "command must not be empty".into()));
+            }
             #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-            return owner::run(command, rest)
+            return owner::run(command, rest, config)
                 .map(u32::from)
-                .map_err(|error| error.to_string());
+                .map_err(|error| (125, error.to_string()));
             #[cfg(windows)]
-            return windows::run(command, rest).map_err(|error| error.to_string());
+            return windows::run(command, rest, config).map_err(|error| (125, error.to_string()));
             #[cfg(not(any(
                 target_os = "linux",
                 target_os = "freebsd",
@@ -66,10 +69,13 @@ fn cli(args: Vec<OsString>) -> Result<u32, String> {
                 windows
             )))]
             {
-                let _ = rest;
-                Err("this development slice supports Linux and FreeBSD only".into())
+                let _ = (rest, config);
+                Err((125, "unsupported platform".into()))
             }
         }
-        _ => Err("expected run -- <command> [args...]; see --help".into()),
+        _ => Err((
+            125,
+            "expected run [options] -- <command> [args...]; see --help".into(),
+        )),
     }
 }

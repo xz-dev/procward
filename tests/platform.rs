@@ -15,7 +15,16 @@ fn backend_runs_real_fixture_and_preserves_primary_status() {
         .unwrap()
         .join(format!("examples/fixture{}", std::env::consts::EXE_SUFFIX));
     let mut child = Command::new(env!("CARGO_BIN_EXE_procward"))
-        .args(["run", "--"])
+        .args([
+            "run",
+            "--grace",
+            "2s",
+            "--fatal-grace",
+            "1s",
+            "--cleanup-deadline",
+            "2500ms",
+            "--",
+        ])
         .arg(fixture)
         .args(["exit", "23"])
         .spawn()
@@ -129,4 +138,46 @@ fn native_arguments_and_redirected_streams_survive_backend_spawn() {
     assert_eq!(output.stdout, expected);
     assert_eq!(output.stderr, b"fixture-stderr\n");
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn invalid_cleanup_configuration_is_exit_two_without_payload_side_effects() {
+    let marker =
+        std::env::temp_dir().join(format!("procward-invalid-timing-{}", std::process::id()));
+    let fixture = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("examples/fixture{}", std::env::consts::EXE_SUFFIX));
+    for options in [
+        vec!["--grace", "0ms"],
+        vec!["--fatal-grace", "0s"],
+        vec!["--grace", "2s", "--fatal-grace", "3s"],
+        vec!["--cleanup-deadline", "6s"],
+        vec!["--grace", "8s"],
+        vec!["--grace", "nan"],
+        vec!["--grace", "-1s"],
+        vec!["--grace", "18446744073709551615s"],
+        vec!["--grace", "6s", "--grace", "6s"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_procward"))
+            .arg("run")
+            .args(&options)
+            .arg("--")
+            .arg(&fixture)
+            .arg("touch")
+            .arg(&marker)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{options:?}: {output:?}");
+        assert!(!output.stderr.is_empty());
+        assert!(!marker.try_exists().unwrap());
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_procward"))
+        .args(["run", "--grace"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
 }

@@ -233,6 +233,33 @@ fn main() {
                         thread::park();
                     }
                 }
+                #[cfg(unix)]
+                "deadline-failover" => {
+                    use std::sync::{
+                        Arc,
+                        atomic::{AtomicBool, Ordering},
+                    };
+                    let term = Arc::new(AtomicBool::new(false));
+                    signal_hook::flag::register(signal_hook::consts::SIGTERM, term.clone())
+                        .unwrap();
+                    fs::write(dir.join("ready"), b"ready").unwrap();
+                    let mut cleanup = None;
+                    let mut late = false;
+                    loop {
+                        if term.load(Ordering::SeqCst) && cleanup.is_none() {
+                            cleanup = Some(Instant::now());
+                            fs::write(dir.join("cleanup-start"), b"TERM observed").unwrap();
+                        }
+                        if !late
+                            && cleanup
+                                .is_some_and(|start| start.elapsed() >= Duration::from_millis(1800))
+                        {
+                            fs::write(dir.join("late-cleanup"), b"late work reached").unwrap();
+                            late = true;
+                        }
+                        thread::park_timeout(Duration::from_millis(5));
+                    }
+                }
                 #[cfg(windows)]
                 "job-wait" => {
                     let _branch = spawn("branch", dir);

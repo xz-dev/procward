@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use crate::{
+    config::Config,
     inventory::{Inventory, children},
     policy::{Phase, Policy},
 };
@@ -17,7 +18,7 @@ use std::{
     io,
     process::Command,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub fn acquire() -> io::Result<()> {
@@ -40,6 +41,8 @@ pub fn run_owned(
     command: &OsStr,
     args: &[OsString],
     lease: &rustix::fd::OwnedFd,
+    notice: &rustix::fd::OwnedFd,
+    config: Config,
 ) -> io::Result<u8> {
     acquire()?;
     let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
@@ -58,6 +61,7 @@ pub fn run_owned(
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
     let mut inventory = Inventory::new();
     let mut result = None;
+    let mut requested = None;
     let observed = (|| -> io::Result<()> {
         loop {
             inventory.refresh()?;
@@ -83,13 +87,21 @@ pub fn run_owned(
             reap_adopted(primary, &mut inventory)?;
             // Fatal requests select one immutable policy now, even if primary ignores TERM.
             if let Some(signal) = signals.pending().find(|signal| *signal != SIGCHLD) {
-                child.signal(signal)?;
+                requested = Some(signal);
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(5));
         }
     })();
-    cleanup(&mut inventory, Some(primary), &mut result, false)?;
+    let policy = Policy::new(config, false);
+    let published = crate::owner::publish(notice, policy);
+    let forwarded = match requested {
+        Some(signal) => child.signal(signal),
+        None => Ok(()),
+    };
+    cleanup(&mut inventory, Some(primary), &mut result, policy)?;
+    published?;
+    forwarded?;
     observed?;
     result.ok_or_else(|| io::Error::other("primary result missing after cleanup"))
 }
@@ -111,11 +123,10 @@ pub(crate) fn cleanup(
     inventory: &mut Inventory,
     primary: Option<Pid>,
     result: &mut Option<u8>,
-    saved_fatal_status: bool,
+    policy: Policy,
 ) -> io::Result<()> {
-    let policy = Policy::new(Instant::now(), saved_fatal_status);
     loop {
-        let phase = policy.phase(Instant::now());
+        let phase = policy.phase(crate::policy::now());
         if phase == Phase::Expired {
             return Err(io::Error::other(
                 "cleanup deadline expired: owned children remain",
