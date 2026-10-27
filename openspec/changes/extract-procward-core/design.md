@@ -106,6 +106,34 @@ This walking skeleton immediately KILLs the ordinary process group on primary ex
 
 Drive one monotonic cleanup deadline. Deliver TERM before permitted teardown CONT, then KILL; on Linux/FreeBSD use 6 seconds for abnormal owner loss, 3 only when saved fatal helper wait status is already known at selection, inside 7.5 seconds. EOF-first remains 6 seconds even if fatal status arrives later. Adoption does not restart policy. Healthy reaping never consumes the saved primary result. Test boundary decisions with a tiny injectable clock/OS seam only where deterministic tests need it; do not reproduce a general scheduler abstraction.
 
+**Section 3 implementation notes:** Linux now retains birth-checked pidfds for
+unreaped direct/adopted children. Kernel reaper ancestry is the authority for
+recursive cleanup: killing a direct owner exposes its detached children on the
+next adoption sweep, without opening handles to arbitrary numeric descendants.
+Healthy reaping removes inventory entries. If pidfds are unavailable, the visible
+limitation is nondirect freezing; unreaped direct-child cleanup remains active.
+
+The smallest owner-loss arrangement has two same-binary native processes: the
+shell-facing owner and a separate-process-group anchor that owns the payload.
+Both are subreapers. A close-on-exec nonblocking pipe carries one launch grant and
+then owner liveness; it is never inherited by the payload. The anchor arms
+parent-death SIGCONT and rechecks its live parent before granting launch. A killed
+anchor is reaped by the surviving outer owner, which then cleans adopted work.
+Loss of both roles remains excluded. No copied role topology is used.
+
+An implementation experiment showed that adding `Command::pre_exec` to an
+untrusted payload switches this host's std path to libc execvp's ENOEXEC shell
+fallback (the plain-text negative fixture ran). Therefore only the trusted native
+anchor has a pre-exec hook. Payload launch permission is the anchor's final live
+lease check immediately before ordinary process-wrap spawn; owner loss after
+permission starts cleanup, rather than claiming to undo an already granted exec.
+
+Early CI also corrected two tooling assumptions: `cargo test --all-targets`
+builds the example's test harness, not its runnable fixture image, so CI explicitly
+builds examples first. Alpine's native compiler reports `*-alpine-linux-musl`;
+the row maps that vendor alias to the required `*-unknown-linux-musl` label while
+printing actual rustc host and executing native musl fixtures.
+
 **Interactive extension:** direct groups alone do not prevent a physical tty background syscall from stopping application progress after shell reclaim. The behavioural reference documents this real failure, so interactive isolation is justified for the preserved terminal/cleanup guarantee, not for ordinary pipe execution. Add a focused Unix private PTY path only in this slice, using rustix-openpty if it reduces correct code. Keep physical authority with runnable native roles in the caller session; primary input/output uses the private terminal, redirected stderr remains unchanged, and fatal draining cannot wait on stopped output. The own code is grant/stop/resume/restore/relay coordination, not another PTY implementation. Preserve normal output; fatal cleanup may discard it. If a simpler direct-handoff path passes every adversarial authority/blocked-IO fixture, prefer it instead; externally required behaviour and task coverage do not change.
 
 Ctrl-Z restores cooked state and stops shell-facing/owned work, not every cleanup helper. `bg` resumes private work without physical IO; `fg` grants IO and continues. Reconcile a CONT racing freeze, never issue healthy grants during irreversible cleanup, and never mask TTIN/TTOU to force a denied restoration. Linux nondirect freeze uses birth-checked pidfds; FreeBSD uses its kernel subtree; macOS uses retained observed identities. A missing pidfd can visibly reduce freezing capability but not disable reaper cleanup.
