@@ -209,6 +209,11 @@ impl Inventory {
         self.0.remove(&pid);
         self.1.remove(&pid);
     }
+    #[cfg(test)]
+    pub(crate) fn knows(&self, pid: Pid) -> bool {
+        self.0.contains_key(&pid)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty() && self.1.is_empty()
     }
@@ -417,5 +422,7 @@ mod tests {
                 "EXPECTED MACOS LIMITATION: setsid/reparent before first observation escapes best-effort inventory; rescue follows separately"
             );
         }
+        // Keep real child-owning cases sequential: concurrent inventories would own each other's fixtures.
+        crate::owner::tests::retained_darwin_inventory_cleans_after_observer_loss();
     }
 }

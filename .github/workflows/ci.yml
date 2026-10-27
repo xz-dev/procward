@@ -33,7 +33,7 @@ jobs:
           test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
       - name: Full standalone fixture suite
         run: |
-          cargo build --locked --examples
+          cargo build --locked --bins --examples
           cargo test --locked --all-targets -- --nocapture
       - name: MSRV
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -61,7 +61,7 @@ jobs:
             git -c safe.directory=/src rev-parse HEAD
             rustc -vV
             test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "${{ matrix.target }}"
-            cargo build --locked --examples
+            cargo build --locked --bins --examples
             cargo test --locked --all-targets -- --nocapture
           '
   freebsd:
@@ -90,5 +90,5 @@ jobs:
             uname -a
             rustc -vV
             test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
-            cargo build --locked --examples
+            cargo build --locked --bins --examples
             cargo test --locked --all-targets -- --nocapture

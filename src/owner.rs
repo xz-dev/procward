@@ -131,14 +131,28 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
                 .unwrap_or_else(|| Policy::new(config, status.signal().is_some()));
             #[cfg(not(target_os = "macos"))]
             let mut observed = Inventory::new();
-            crate::reaper::cleanup(&mut observed, None, &mut None, policy)?;
-            return Ok(status.code().unwrap_or(125) as u8);
+            return finish_anchor(status, &mut observed, policy);
         }
         for signal in signals.pending().filter(|signal| *signal != SIGCHLD) {
             process::kill_process(pid, Signal::from_named_raw(signal).unwrap())?;
         }
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+pub(crate) fn finish_anchor(
+    status: std::process::ExitStatus,
+    observed: &mut Inventory,
+    policy: Policy,
+) -> io::Result<u8> {
+    #[cfg(target_os = "macos")]
+    if status.signal().is_some() {
+        eprintln!(
+            "procward: macOS best-effort observer lost; pre-observation descendants may escape after reparenting"
+        );
+    }
+    crate::reaper::cleanup(observed, None, &mut None, policy)?;
+    Ok(status.code().unwrap_or(125) as u8)
 }
 
 fn arm_parent(expected: Pid) -> io::Result<()> {
@@ -153,6 +167,25 @@ fn arm_parent(expected: Pid) -> io::Result<()> {
     Ok(())
 }
 
+fn validate_endpoint(fd: rustix::fd::BorrowedFd<'_>, access: rustix::fs::OFlags) -> io::Result<()> {
+    let flags = rustix::fs::fcntl_getfl(fd)?;
+    let stat = rustix::fs::fstat(fd)?;
+    let valid_access = flags & rustix::fs::OFlags::ACCMODE == access;
+    // FreeBSD pipe(2) endpoints are bidirectional: https://man.freebsd.org/cgi/man.cgi?query=pipe&sektion=2
+    #[cfg(target_os = "freebsd")]
+    let valid_access = valid_access
+        || (flags & rustix::fs::OFlags::ACCMODE == rustix::fs::OFlags::RDWR && stat.st_nlink == 0);
+    if !valid_access
+        || rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo
+    {
+        return Err(io::Error::other(format!(
+            "invalid native endpoint type/access: flags={flags:?}, mode={:#o}, links={}",
+            stat.st_mode, stat.st_nlink
+        )));
+    }
+    Ok(())
+}
+
 fn inherited_fd(value: &OsStr, access: rustix::fs::OFlags) -> io::Result<OwnedFd> {
     let raw = value
         .to_str()
@@ -161,13 +194,7 @@ fn inherited_fd(value: &OsStr, access: rustix::fs::OFlags) -> io::Result<OwnedFd
         .ok_or_else(|| io::Error::other("invalid anchor native endpoint"))?;
     let borrowed = unsafe { rustix::fd::BorrowedFd::borrow_raw(raw) };
     rio::fcntl_setfd(borrowed, FdFlags::CLOEXEC)?;
-    let flags = rustix::fs::fcntl_getfl(borrowed)?;
-    let stat = rustix::fs::fstat(borrowed)?;
-    if flags & rustix::fs::OFlags::ACCMODE != access
-        || rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Fifo
-    {
-        return Err(io::Error::other("invalid native endpoint type/access"));
-    }
+    validate_endpoint(borrowed, access)?;
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
@@ -247,8 +274,24 @@ pub fn alive(lease: impl rustix::fd::AsFd) -> io::Result<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn native_endpoints_have_required_access_and_reject_regular_files() {
+        use rustix::fd::AsFd;
+        let (read, write) = pipe().unwrap();
+        validate_endpoint(read.as_fd(), rustix::fs::OFlags::RDONLY).unwrap();
+        validate_endpoint(write.as_fd(), rustix::fs::OFlags::WRONLY).unwrap();
+        #[cfg(not(target_os = "freebsd"))]
+        assert!(validate_endpoint(read.as_fd(), rustix::fs::OFlags::WRONLY).is_err());
+        #[cfg(target_os = "freebsd")]
+        assert_eq!(
+            rustix::fs::fcntl_getfl(&read).unwrap() & rustix::fs::OFlags::ACCMODE,
+            rustix::fs::OFlags::RDWR
+        );
+        let regular = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        assert!(validate_endpoint(regular.as_fd(), rustix::fs::OFlags::RDONLY).is_err());
+    }
     #[test]
     fn policy_transport_preserves_one_record_and_refuses_partial_or_duplicate_records() {
         let config = Config::default();
@@ -277,5 +320,140 @@ mod tests {
             reader.policy.is_none(),
             "no publication means fallback must select its first policy"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn retained_darwin_inventory_cleans_after_observer_loss() {
+        use std::{
+            fs,
+            path::PathBuf,
+            process::{Child, Stdio},
+            time::Instant,
+        };
+        struct Case {
+            anchor: Child,
+            observed: Inventory,
+            dir: PathBuf,
+        }
+        impl Drop for Case {
+            fn drop(&mut self) {
+                let _ = self.observed.refresh();
+                let rescued =
+                    self.anchor.try_wait().unwrap().is_none() || !self.observed.is_empty();
+                if rescued {
+                    eprintln!(
+                        "HARNESS RESCUE: native Darwin observer test did not complete cleanup"
+                    );
+                    let _ = self.anchor.kill();
+                    let _ = self.anchor.wait();
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    loop {
+                        self.observed.refresh().unwrap();
+                        self.observed.advance(crate::policy::Phase::Kill).unwrap();
+                        if self.observed.is_empty() {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                let _ = self.anchor.wait();
+                fs::remove_dir_all(&self.dir).unwrap();
+                assert!(
+                    !rescued || thread::panicking(),
+                    "native observer cleanup needed rescue"
+                );
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "procward-darwin-native-observer-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let target = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let (lease, live) = pipe().unwrap();
+        let (notice, publish) = pipe().unwrap();
+        let lease_raw = lease.as_raw_fd();
+        let publish_raw = publish.as_raw_fd();
+        let config = Config::from_millis(2000, 1000, 2500).unwrap();
+        let mut command = Command::new(target.join("procward"));
+        command
+            .arg("__anchor")
+            .arg(std::process::id().to_string())
+            .arg(lease_raw.to_string())
+            .arg(publish_raw.to_string())
+            .args(["2000", "1000", "2500"])
+            .arg(target.join("examples/fixture"))
+            .arg("tree")
+            .arg(&directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .process_group(0);
+        unsafe {
+            command.pre_exec(move || {
+                for raw in [lease_raw, publish_raw] {
+                    rio::fcntl_setfd(rustix::fd::BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
+                }
+                Ok(())
+            });
+        }
+        let anchor = command.spawn().unwrap();
+        drop(lease);
+        drop(publish);
+        rio::write(&live, b"R").unwrap();
+        let mut case = Case {
+            anchor,
+            observed: Inventory::new(),
+            dir: directory,
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let mut ready = true;
+            let mut pids = Vec::new();
+            for mode in ["tree", "branch", "worker"] {
+                let path = case.dir.join(format!("{mode}.pid"));
+                match fs::read_to_string(path) {
+                    Ok(text) => match text.parse::<i32>().ok().and_then(Pid::from_raw) {
+                        Some(pid) => pids.push(pid),
+                        None => ready = false,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => ready = false,
+                    Err(error) => panic!("fixture readiness query failed: {error}"),
+                }
+            }
+            case.observed.refresh().unwrap();
+            if ready && pids.iter().all(|pid| case.observed.knows(*pid)) {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // All live fixture ancestry was swept before the observer can be killed.
+        case.observed.refresh().unwrap();
+        let mut reader = PolicyReader::new();
+        reader.refresh(&notice, config).unwrap();
+        assert!(
+            reader.policy.is_none(),
+            "healthy observer must not publish cleanup policy"
+        );
+        let fault = Instant::now();
+        case.anchor.kill().unwrap();
+        let status = loop {
+            if let Some(status) = case.anchor.try_wait().unwrap() {
+                break status;
+            }
+            assert!(fault.elapsed() < Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(5));
+        };
+        let code = finish_anchor(status, &mut case.observed, Policy::new(config, true)).unwrap();
+        assert_eq!(code, 125);
+        assert!(case.observed.is_empty());
+        assert!(fault.elapsed() <= config.deadline);
     }
 }

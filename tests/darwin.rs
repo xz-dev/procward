@@ -60,6 +60,7 @@ struct Run {
     child: Child,
     dir: PathBuf,
     observed: Vec<BSDInfo>,
+    expected_preobservation_cleanup: bool,
 }
 impl Run {
     fn start(serial: usize) -> Self {
@@ -81,12 +82,14 @@ impl Run {
             .arg("tree")
             .arg(&dir)
             .stdin(Stdio::piped())
+            .stderr(fs::File::create(dir.join("stderr.log")).unwrap())
             .spawn()
             .unwrap();
         let mut run = Self {
             child,
             dir,
             observed: Vec::new(),
+            expected_preobservation_cleanup: false,
         };
         for mode in ["tree", "branch", "worker"] {
             let path = run.dir.join(format!("{mode}.pid"));
@@ -123,10 +126,12 @@ impl Drop for Run {
     fn drop(&mut self) {
         let mut rescued = false;
         for info in &self.observed {
-            if facts(info.pbi_pid)
-                .unwrap()
-                .is_some_and(|now| same(info, &now))
-            {
+            let current = match facts(info.pbi_pid) {
+                Ok(current) => current,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => panic!("fixture cleanup identity query failed: {error}"),
+            };
+            if current.is_some_and(|now| same(info, &now)) {
                 process::kill_process(Pid::from_raw(info.pbi_pid as i32).unwrap(), Signal::KILL)
                     .unwrap();
                 rescued = true;
@@ -136,11 +141,15 @@ impl Drop for Run {
         let _ = self.child.wait();
         poll(Instant::now() + Duration::from_secs(3), || self.gone());
         fs::remove_dir_all(&self.dir).unwrap();
-        if rescued {
+        if self.expected_preobservation_cleanup {
+            eprintln!(
+                "HARNESS CLEANUP: Darwin pre-observation observer-loss window; known fixtures cleaned by test, NOT product cleanup"
+            );
+        } else if rescued {
             eprintln!("HARNESS RESCUE: known Darwin survivor; NOT product best-effort sweep");
         }
         assert!(
-            !rescued || thread::panicking(),
+            !rescued || self.expected_preobservation_cleanup || thread::panicking(),
             "observed fixture needed rescue"
         );
     }
@@ -175,6 +184,12 @@ fn darwin_best_effort_tree_owner_loss_and_observer_loss() {
             Some(125),
             "observer loss must fail closed"
         );
-        poll(fault + Duration::from_secs(8), || run.gone());
+        assert!(
+            fs::read_to_string(run.dir.join("stderr.log"))
+                .unwrap()
+                .contains("pre-observation descendants may escape")
+        );
+        run.expected_preobservation_cleanup = true;
+        assert!(fault.elapsed() <= Duration::from_secs(8));
     }
 }
