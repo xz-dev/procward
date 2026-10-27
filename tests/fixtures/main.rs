@@ -10,9 +10,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+mod windows;
+
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        #[cfg(windows)]
+        "console" => windows::interactive(),
+        #[cfg(windows)]
+        "console-host" => windows::console_host(&args[2], Path::new(&args[3])),
         #[cfg(windows)]
         "job-member" => {
             use windows_sys::Win32::System::{

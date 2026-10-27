@@ -6,7 +6,25 @@ use std::{
     time::Duration,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+static CLOSING: AtomicBool = AtomicBool::new(false);
+unsafe extern "system" fn console_control(event: u32) -> i32 {
+    if event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT {
+        CLOSING.store(true, Ordering::SeqCst);
+    }
+    // The console delivers C/Break to the payload itself; forwarding would duplicate it.
+    1
+}
+
 pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u32> {
+    if unsafe { SetConsoleCtrlHandler(Some(console_control), 1) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32)
+        {
+            return Err(error);
+        }
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -19,6 +37,9 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u32> {
             .spawn()?;
         // JobObject::wait waits for the entire Job; observe only its immediate inner primary first.
         let status = loop {
+            if CLOSING.load(Ordering::SeqCst) {
+                child.start_kill()?;
+            }
             if let Some(status) = child.inner_mut().try_wait()? {
                 break status;
             }

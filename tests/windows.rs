@@ -193,3 +193,24 @@ fn launch_restrictions_refuse_payload_side_effects() {
     assert_eq!(status.code(), Some(23));
     assert!(!marker.try_exists().unwrap());
 }
+
+mod windows_conpty;
+
+#[test]
+fn console_handles_one_ctrl_c_and_break_then_response_driven_quit() {
+    let dir = std::env::temp_dir().join(format!("procward-console-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let mut child = Command::new(fixture())
+        .arg("console-host")
+        .arg(env!("CARGO_BIN_EXE_procward"))
+        .arg(&dir)
+        .spawn()
+        .unwrap();
+    poll(Instant::now() + Duration::from_secs(40), || {
+        child.try_wait().unwrap().is_some()
+    });
+    let status = child.wait().unwrap();
+    let transcript = fs::read_to_string(dir.join("console.log"));
+    fs::remove_dir_all(dir).unwrap();
+    assert_eq!(status.code(), Some(23), "{transcript:?}");
+}
