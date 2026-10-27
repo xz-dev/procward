@@ -56,7 +56,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Native musl build and full fixture execution
         run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.23 sh -ec '
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.23@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63 sh -ec '
             apk add --no-cache cargo rust musl-dev gcc git
             git -c safe.directory=/src rev-parse HEAD
             rustc -vV
@@ -92,3 +92,47 @@ jobs:
             test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
             cargo build --locked --bins --examples
             cargo test --locked --all-targets -- --nocapture
+  riscv64:
+    name: ${{ matrix.target }} (qemu-user)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: riscv64gc-unknown-linux-gnu
+            libc: gnu
+            image: debian:unstable-slim@sha256:d20827a3ee132f4ddf5307a4f56899e3a0ba8a7406ce51569729c564eb7d9dde
+          - target: riscv64gc-unknown-linux-musl
+            libc: musl
+            image: alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: riscv64
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - name: Emulated riscv64 build and full fixture execution
+        run: |
+          echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
+          cat /proc/sys/fs/binfmt_misc/qemu-riscv64
+          docker run --rm --platform linux/riscv64 -v "$PWD:/src" -w /src \
+            -e PROCWARD_CI_LIBC='${{ matrix.libc }}' -e PROCWARD_CI_TARGET='${{ matrix.target }}' \
+            -e CARGO_TARGET_DIR='/src/target/riscv64-${{ matrix.libc }}' -e RUST_TEST_THREADS=1 \
+            '${{ matrix.image }}' sh -ec '
+              if [ "$PROCWARD_CI_LIBC" = gnu ]; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y --no-install-recommends cargo rustc gcc libc6-dev ca-certificates git
+              else
+                apk add --no-cache cargo rust musl-dev gcc ca-certificates git
+              fi
+              git -c safe.directory=/src rev-parse HEAD
+              uname -m
+              rustc -vV
+              test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "$PROCWARD_CI_TARGET"
+              cargo build --locked --bins --examples
+              cargo test --locked --all-targets -- --nocapture
+            '
