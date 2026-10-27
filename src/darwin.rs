@@ -41,6 +41,12 @@ struct Target {
 }
 pub struct Inventory(HashMap<Pid, Target>);
 
+fn list_children(parent: u32) -> io::Result<Vec<u32>> {
+    // libproc 0.14.11 checks errno on a valid empty result without clearing stale errno first.
+    errno::set_errno(errno::Errno(0));
+    pids_by_type(ProcFilter::ByParentProcess { ppid: parent })
+}
+
 fn query(pid: Pid) -> io::Result<Option<BSDInfo>> {
     match pidinfo::<BSDInfo>(pid.as_raw_nonzero().get(), 0) {
         Ok(info) if info.pbi_pid == pid.as_raw_nonzero().get() as u32 => Ok(Some(info)),
@@ -95,7 +101,7 @@ impl Inventory {
                 continue;
             }
             let mut observed = Vec::new();
-            for raw in pids_by_type(ProcFilter::ByParentProcess { ppid: before.pid })? {
+            for raw in list_children(before.pid)? {
                 let pid = Pid::from_raw(raw as i32)
                     .ok_or_else(|| io::Error::other("invalid libproc child PID"))?;
                 if let Some(info) = query(pid)? {
@@ -164,14 +170,13 @@ impl Inventory {
 }
 
 pub fn children() -> io::Result<Vec<Pid>> {
-    pids_by_type(ProcFilter::ByParentProcess {
-        ppid: std::process::id(),
-    })?
-    .into_iter()
-    .map(|pid| {
-        Pid::from_raw(pid as i32).ok_or_else(|| io::Error::other("invalid libproc direct child"))
-    })
-    .collect()
+    list_children(std::process::id())?
+        .into_iter()
+        .map(|pid| {
+            Pid::from_raw(pid as i32)
+                .ok_or_else(|| io::Error::other("invalid libproc direct child"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
