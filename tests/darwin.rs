@@ -26,10 +26,17 @@ fn poll(deadline: Instant, mut predicate: impl FnMut() -> bool) {
 fn facts(pid: u32) -> io::Result<Option<BSDInfo>> {
     match pidinfo::<BSDInfo>(pid as i32, 0) {
         Ok(info) => Ok(Some(info)),
-        Err(error) => match process::test_kill_process(Pid::from_raw(pid as i32).unwrap()) {
-            Err(Errno::SRCH) => Ok(None),
-            _ => Err(io::Error::other(error)),
-        },
+        Err(error) => {
+            let query_errno = errno::errno().0;
+            match process::test_kill_process(Pid::from_raw(pid as i32).unwrap()) {
+                Err(Errno::SRCH) => Ok(None),
+                Ok(()) if query_errno == Errno::SRCH.raw_os_error() => Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "existing process has no libproc identity yet",
+                )),
+                _ => Err(io::Error::other(error)),
+            }
+        }
     }
 }
 fn same(a: &BSDInfo, b: &BSDInfo) -> bool {
@@ -104,10 +111,11 @@ impl Run {
         self.child.wait().unwrap()
     }
     fn gone(&self) -> bool {
-        self.observed.iter().all(|info| {
-            facts(info.pbi_pid)
-                .unwrap()
-                .is_none_or(|now| !same(info, &now))
+        self.observed.iter().all(|info| match facts(info.pbi_pid) {
+            Ok(None) => true,
+            Ok(Some(now)) => !same(info, &now),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("Darwin completion query failed: {error}"),
         })
     }
 }

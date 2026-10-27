@@ -39,7 +39,7 @@ struct Target {
     identity: Identity,
     term_sent: bool,
 }
-pub struct Inventory(HashMap<Pid, Target>);
+pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>);
 
 fn list_children(parent: u32) -> io::Result<Vec<u32>> {
     // libproc 0.14.11 checks errno on a valid empty result without clearing stale errno first.
@@ -53,11 +53,13 @@ fn query(pid: Pid) -> io::Result<Option<BSDInfo>> {
         Ok(_) => Err(io::Error::other(
             "libproc returned a mismatched process PID",
         )),
-        Err(message) => match process::test_kill_process(pid) {
-            Err(Errno::SRCH) => Ok(None),
-            _ => Err(io::Error::other(format!(
-                "libproc identity query for {pid} failed: {message}"
-            ))),
+        Err(message) => {
+            let query_errno = errno::errno().0;
+            match process::test_kill_process(pid) {
+                Err(Errno::SRCH) => Ok(None),
+                Ok(()) if query_errno == Errno::SRCH.raw_os_error() => Err(io::Error::new(io::ErrorKind::WouldBlock, format!("process {pid} still exists but libproc has no identity yet"))),
+                _ => Err(io::Error::other(format!("libproc identity query for {pid} failed: {message}"))),
+            }
         },
     }
 }
@@ -76,19 +78,32 @@ fn signal_if_current(
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self(HashMap::new(), HashSet::new())
     }
     pub fn refresh(&mut self) -> io::Result<()> {
         let root = process::getpid();
+        // Unknown observations remain completion blockers, never signalling authority.
+        let mut absent = Vec::new();
+        for pid in &self.1 {
+            match query(*pid) {
+                Ok(None) => absent.push(*pid),
+                Ok(Some(_)) => {},
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                Err(error) => return Err(error),
+            }
+        }
+        for pid in absent { self.1.remove(&pid); }
         let mut pending: Vec<_> = self.0.keys().copied().chain([root]).collect();
         let mut visited = HashSet::new();
         while let Some(parent) = pending.pop() {
             if !visited.insert(parent) {
                 continue;
             }
-            let Some(before) = query(parent)? else {
-                self.0.remove(&parent);
-                continue;
+            let before = match query(parent) {
+                Ok(Some(info)) => info,
+                Ok(None) => { self.0.remove(&parent); continue; },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
             };
             let before = Identity::from_info(&before);
             if parent != root
@@ -104,16 +119,23 @@ impl Inventory {
             for raw in list_children(before.pid)? {
                 let pid = Pid::from_raw(raw as i32)
                     .ok_or_else(|| io::Error::other("invalid libproc child PID"))?;
-                if let Some(info) = query(pid)? {
-                    if info.pbi_ppid == before.pid {
-                        observed.push((pid, Identity::from_info(&info)));
-                    }
+                match query(pid) {
+                    Ok(Some(info)) if info.pbi_ppid == before.pid => observed.push((pid, Identity::from_info(&info))),
+                    Ok(_) => {},
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => { self.1.insert(pid); },,
+                    Err(error) => return Err(error),
                 }
             }
-            if query(parent)?.as_ref().map(Identity::from_info) != Some(before) {
+            let after = match query(parent) {
+                Ok(info) => info.as_ref().map(Identity::from_info),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
+            };
+            if after != Some(before) {
                 continue;
             }
             for (pid, identity) in observed {
+                self.1.remove(&pid);
                 let entry = self.0.entry(pid).or_insert(Target {
                     identity,
                     term_sent: false,
@@ -132,14 +154,22 @@ impl Inventory {
     pub fn advance(&mut self, phase: Phase) -> io::Result<()> {
         let mut gone = Vec::new();
         for (pid, target) in &mut self.0 {
-            let current = query(*pid)?.as_ref().map(Identity::from_info);
+            let current = match query(*pid) {
+                Ok(info) => info.as_ref().map(Identity::from_info),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
+            };
             if current != Some(target.identity) {
                 gone.push(*pid);
                 continue;
             }
             for signal in next_signals(phase, &mut target.term_sent) {
                 // macOS has an unavoidable final identity-check/use race, not kernel containment.
-                let current = query(*pid)?.as_ref().map(Identity::from_info);
+                let current = match query(*pid) {
+                    Ok(info) => info.as_ref().map(Identity::from_info),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(error),
+                };
                 match signal_if_current(target.identity, Ok(current), || {
                     process::kill_process(*pid, *signal).map_err(io::Error::from)
                 }) {
@@ -163,9 +193,10 @@ impl Inventory {
     }
     pub fn forget(&mut self, pid: Pid) {
         self.0.remove(&pid);
+        self.1.remove(&pid);
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_empty() && self.1.is_empty()
     }
 }
 
@@ -250,7 +281,12 @@ mod tests {
                         identity.pid, self.expected_escape
                     );
                     process::kill_process(pid, process::Signal::KILL).unwrap();
-                    poll(|| query(pid).unwrap().is_none());
+                    poll(|| match query(pid) {
+                        Ok(None) => true,
+                        Ok(Some(_)) => false,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+                        Err(error) => panic!("fixture reaping query failed: {error}"),
+                    });
                     assert!(
                         self.expected_escape || thread::panicking(),
                         "observed fixture needed rescue"
@@ -259,6 +295,14 @@ mod tests {
             }
             fs::remove_dir_all(&self.dir).unwrap();
         }
+    }
+    #[test]
+    fn unknown_observation_blocks_completion_without_signal_authority() {
+        let mut inventory = Inventory::new();
+        inventory.1.insert(process::getpid());
+        inventory.advance(Phase::Grace).unwrap();
+        assert!(!inventory.is_empty());
+        assert!(query(process::getpid()).unwrap().is_some());
     }
     #[test]
     fn changed_birth_pid_or_credentials_and_unknown_queries_never_authorize_signal() {
