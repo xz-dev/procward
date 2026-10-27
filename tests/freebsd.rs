@@ -114,9 +114,65 @@ fn wait_file(path: &Path) {
     });
 }
 
+fn successful_reaper_kill_has_no_failed_pid() {
+    struct DirectFixture {
+        child: Child,
+        dir: PathBuf,
+    }
+    impl Drop for DirectFixture {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("procward-reaper-kill-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let fixture = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/fixture");
+    let child = Command::new(fixture)
+        .arg("waiting")
+        .arg(&dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut fixture = DirectFixture { child, dir };
+    wait_file(&fixture.dir.join("waiting.pid"));
+    assert!(
+        fixture.child.try_wait().unwrap().is_none(),
+        "gated fixture exited before reaper signal"
+    );
+    let inventory = process::get_reaper_pids(None).unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.pid.as_raw_nonzero().get() as u32 == fixture.child.id())
+    );
+    let result = process::reaper_kill(None, Signal::TERM, false, None).unwrap();
+    assert!(
+        result.first_failed.is_none(),
+        "successful reaper kill reported a failed PID: {result:?}"
+    );
+    assert_eq!(result.killed, 1);
+    poll(Instant::now() + Duration::from_secs(8), || {
+        fixture.child.try_wait().unwrap().is_some()
+    });
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        fixture.child.wait().unwrap().signal(),
+        Some(signal_hook::consts::SIGTERM)
+    );
+}
+
 #[test]
 fn freebsd_reaper_lifecycle_and_targeted_parent_death_wake() {
     process::set_reaper_status(true).unwrap();
+    successful_reaper_kill_has_no_failed_pid();
     // One sequential scenario group: this process's rescue reaper owns no other test's work.
     {
         let mut run = Run::new("detached-tree", 0);

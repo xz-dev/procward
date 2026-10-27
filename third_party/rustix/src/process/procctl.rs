@@ -1,3 +1,4 @@
+// Modified for procward: map FreeBSD's no-failed-PID sentinel to None.
 //! Bindings for the FreeBSD `procctl` system call.
 //!
 //! There are similarities (but also differences) with Linux's `prctl` system
@@ -442,7 +443,11 @@ pub fn reaper_kill(
     unsafe { procctl(PROC_REAP_KILL, process, as_mut_ptr(&mut req).cast())? };
     Ok(KillResult {
         killed: req.rk_killed as _,
-        first_failed: Pid::from_raw(req.rk_fpid),
+        first_failed: if req.rk_fpid > 0 {
+            Pid::from_raw(req.rk_fpid)
+        } else {
+            None
+        },
     })
 }
 

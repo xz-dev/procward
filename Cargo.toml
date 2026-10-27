@@ -49,3 +49,4 @@ signal-hook = { version = "=0.4.5", default-features = false, features = ["itera
 
 [patch.crates-io]
 process-wrap = { path = "third_party/process-wrap" }
+rustix = { path = "third_party/rustix" }
