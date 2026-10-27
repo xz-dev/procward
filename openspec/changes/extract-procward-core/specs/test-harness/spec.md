@@ -38,7 +38,7 @@ Fixtures SHALL cover startup/owner-loss races, stopped/detached descendants, liv
 - **THEN** tests observe reaping during healthy operation, not only eventual disappearance at shutdown
 
 ### Requirement: Preserve deadline assertions and report rescue honestly
-Fault tests SHALL measure at most 8 seconds from injection to platform completion with default settings, with default 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Non-default policy/failover tests SHALL enforce the original configured deadline from first cleanup start, not restart timing when a native role dies. Startup/emulation time SHALL not relax fault deadlines. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
+Fault tests SHALL measure at most 8 seconds from injection to platform completion with default settings, with default 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Non-default policy/failover tests SHALL enforce the original configured deadline from first cleanup start, not restart timing when a native role dies. Startup/emulation time SHALL not relax native fault deadlines. If qemu-user execution needs a wider emulated-row budget, its explicit scale factor SHALL be documented and confined to emulated rows; identity/order/liveness/completion predicates and configured-deadline-relative checks SHALL remain intact. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
 
 #### Scenario: Slow runner reaches startup late
 - **WHEN** readiness consumes a larger setup budget before the fault
@@ -60,7 +60,13 @@ As soon as the Linux walking skeleton compiles, development SHALL publish it and
 - **THEN** the rerun is permitted without a special packet or review ritual and original logs remain attributable
 
 ### Requirement: Release only complete applicable coverage
-Before v0.1.0, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
+Before v0.1.0, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. The two riscv64 rows SHALL execute under explicitly labelled, pinned qemu-user/container emulation; host-kernel syscall semantics and nonrepresentative timings SHALL be disclosed. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
+
+#### Scenario: An emulated capability is absent
+- **WHEN** runtime probing in an explicitly labelled qemu-user executor finds seccomp installation ENOSYS or broken std spawn error reporting for a known-missing path
+- **THEN** that case emits `EMULATOR-UNSUPPORTED` and its reason is counted/listed in the job summary, never called a product pass
+- **AND** there is no architecture-based skip or weakened native/other assertion, and genuine primary status 127 remains tested
+- **AND** full-system riscv64 VM coverage is a documented follow-up for unsupported cases
 
 #### Scenario: Target compiles but fixtures fail
 - **WHEN** a target builds successfully without passing its applicable fixtures

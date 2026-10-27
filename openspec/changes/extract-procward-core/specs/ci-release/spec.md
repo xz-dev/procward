@@ -16,7 +16,18 @@ GitHub Actions SHALL be enabled when the first Linux skeleton compiles and SHALL
 - **THEN** earlier required event tests remain runnable rather than being cancelled in favor of the latest revision
 
 ### Requirement: Run the four-platform target matrix
-CI SHALL execute applicable unit, CLI/contract, lifecycle and terminal tests on Linux GNU/musl x64/arm64, FreeBSD x64/arm64 through a VM action, macOS x64/arm64 and Windows x64/arm64 including console/ConPTY. Early red rows SHALL support fix-forward development and normal reruns; all applicable rows SHALL pass before the first release tag.
+CI SHALL execute applicable unit, CLI/contract, lifecycle and terminal tests on Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 through a VM action, macOS x64/arm64 and Windows x64/arm64 including console/ConPTY: twelve required target rows. The riscv64 targets SHALL be `riscv64gc-unknown-linux-gnu` and `riscv64gc-unknown-linux-musl`, executed with pinned qemu-user/binfmt and digest-pinned target containers, not build-only substitutes. Their logs/docs SHALL say “emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative”. Early red rows SHALL support fix-forward development and normal reruns; all applicable rows SHALL pass before the first release tag.
+
+#### Scenario: riscv64 has no hosted runner
+- **WHEN** every-event CI runs either riscv64 target
+- **THEN** it cross-builds release-profile binaries/tests with the official rustup toolchain for the exact target triple and executes them inside the matching GNU/musl riscv64 container under qemu-user
+- **AND** pinned actions/images and explicit emulation/host-kernel/timing labels prevent presenting the result as native riscv64 hardware validation
+
+#### Scenario: Emulator cannot implement a native capability
+- **WHEN** a runtime probe in an explicitly labelled qemu-user executor observes seccomp installation returning ENOSYS or std spawn returning a child exiting 127 for a known-missing path
+- **THEN** the affected test reports `EMULATOR-UNSUPPORTED`, with its count and reason listed in the job summary rather than claiming a product pass
+- **AND** every other assertion and native run stays strict, without target-architecture skips or product workarounds
+- **AND** full-system riscv64 VM coverage remains a documented follow-up for those unsupported cases
 
 #### Scenario: Early backend is unfinished
 - **WHEN** a required platform is not yet complete
@@ -38,7 +49,7 @@ Before pushing `v0.1.0`, the project SHALL obtain one independent implementation
 - **THEN** it is fixed and validated before `v0.1.0` is tagged
 
 ### Requirement: Publish only from stable version-tag pushes
-Releases SHALL be cut only by pushing exact `vX.Y.Z` version tags, beginning with `v0.1.0`. The tag workflow SHALL validate package/tag agreement, build all targets and rerun the full applicable suite from the tagged source and release binaries. Branch/PR/manual/live-release updates SHALL not publish. A failed/missing tag row SHALL block publication; corrections SHALL use a new tag rather than overwrite a published version.
+Releases SHALL be cut only by pushing exact `vX.Y.Z` version tags, beginning with `v0.1.0`. The tag workflow SHALL validate package/tag agreement, build all twelve targets (including riscv64 GNU and musl) and rerun the full applicable suite from the tagged source and release binaries. Branch/PR/manual/live-release updates SHALL not publish. A failed/missing tag row SHALL block publication; corrections SHALL use a new tag rather than overwrite a published version.
 
 #### Scenario: Branch CI passes
 - **WHEN** a branch passes CI without a version-tag push
@@ -47,6 +58,11 @@ Releases SHALL be cut only by pushing exact `vX.Y.Z` version tags, beginning wit
 #### Scenario: First version tag is pushed
 - **WHEN** `v0.1.0` is pushed for package version `0.1.0`
 - **THEN** all release targets are rebuilt/retested before publication is eligible
+
+#### Scenario: riscv64 release assets are prepared
+- **WHEN** a version tag is eligible for publication
+- **THEN** both riscv64 GNU and musl binary/package assets are included in the frozen downloads, SHA256SUMS and provenance attestations
+- **AND** missing/failed emulated fixture rows block publication just like other required targets
 
 #### Scenario: Prior branch pass differs from tag result
 - **WHEN** a required tag-workflow row fails
@@ -75,7 +91,7 @@ Release binaries/packages and `SHA256SUMS` SHALL have GitHub OIDC/Sigstore-backe
 - **THEN** verification rejects publication
 
 ### Requirement: Keep credentials role-limited
-Ordinary push/PR CI SHALL use read-only repository access without signing/publication credentials. Trusted tag attestation jobs SHALL use `contents: read`, `id-token: write` and `attestations: write`; only publishing jobs SHALL receive `contents: write`. Admin credentials SHALL NOT be added for the manual immutability-setting check. Reviewed immutable action revisions SHALL be used.
+Ordinary push/PR CI SHALL use read-only repository access without signing/publication credentials. Trusted tag attestation jobs SHALL use `contents: read`, `id-token: write` and `attestations: write`; only publishing jobs SHALL receive `contents: write`. Admin credentials SHALL NOT be added for the manual immutability-setting check. Reviewed immutable action revisions and digest-pinned container/binfmt images SHALL be used.
 
 #### Scenario: Fork PR runs fixtures
 - **WHEN** an untrusted PR enters CI

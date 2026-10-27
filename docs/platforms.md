@@ -25,6 +25,47 @@ its own destructor or terminal cleanup. Standard crates do not remove those OS
 limits. Unavailable or denied queries are errors, never evidence of absence.
 Stopped work is alive; zombies are not reaped completion.
 
+## riscv64 execution and release scope
+
+Required additional targets: `riscv64gc-unknown-linux-gnu` and
+`riscv64gc-unknown-linux-musl`. Both are **emulated (qemu-user) — semantics of
+prctl/pidfd/process groups are passed through to the host kernel; timings are not
+representative**. This is not native riscv64 kernel/hardware validation.
+
+GitHub has no native riscv64 runner. CI registers only riscv64 binfmt via a
+full-SHA-pinned `docker/setup-qemu-action` and digest-pinned binfmt image, then
+builds release-profile binaries/tests on x64 with the official rustup toolchain
+for the exact `riscv64gc-unknown-linux-gnu` / `riscv64gc-unknown-linux-musl` target,
+then executes them in digest-pinned Debian GNU/Alpine musl containers. GNU uses
+the distro cross GCC/sysroot; musl uses Rust's shipped self-contained runtime and
+linker. No Alpine compiler triple alias is substituted for the release target.
+The workspace is mounted at its original absolute path so compiled-in fixture
+paths remain valid. Source SHA, compiler host, selected target, RISC-V ELF machine
+and executor/caveat are printed. Tests are serialized to avoid emulator CPU
+contention; timing scale remains **1×**, with unchanged timing, ordering, identity,
+liveness and completion assertions. Any wider budget must be explicitly
+documented and confined to emulated rows, never native rows.
+
+Two runtime capabilities can be absent in qemu-user, independent of target
+architecture: seccomp installation can return `ENOSYS`, and libc's
+`CLONE_VFORK`/`posix_spawn` path can return a child exiting 127 for a known-missing
+executable rather than reporting the spawn error. Only an explicitly labelled
+qemu-user test executor plus the matching runtime probe can report
+`EMULATOR-UNSUPPORTED` for the required-wake-denial or exec-error test. Other
+errors remain failures. These are **not product passes**: each job summary counts
+and lists observed unsupported cases. Real exit status 127 is separately tested;
+it is never relabelled as a successful spawn-error result. Native/real riscv64
+runs keep all original assertions because they do not use this emulation flag.
+No product code or native behavior is changed to work around emulator limits.
+
+Follow-up: add a full-system riscv64 VM job (`qemu-system`) for complete kernel,
+seccomp and spawn-error coverage. qemu-user cannot supply evidence for its
+explicitly listed unsupported cases.
+
+Both riscv64 variants are required future release binary/package assets, covered
+by the same checksum, provenance and full tagged-source fixture gates as other
+targets. Their inclusion does not claim a new pi runtime/bundle label.
+
 ## Cleanup timings
 
 ```sh

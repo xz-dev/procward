@@ -5,7 +5,19 @@ Provide four-platform ownership with standard facilities, explicit startup failu
 ## ADDED Requirements
 
 ### Requirement: Complete all four platforms for v0.1.0
-Procward v0.1.0 SHALL support Linux, FreeBSD, macOS and Windows. Linux-first development SHALL be an ordering choice, not a released reduction of scope. An unfinished backend SHALL appear as failed/incomplete development CI, not a false passing release result.
+Procward v0.1.0 SHALL support Linux, FreeBSD, macOS and Windows. Linux SHALL include GNU and musl on x64, arm64 and riscv64; both riscv64 targets are required release assets. GitHub CI SHALL run the riscv64 fixtures under pinned qemu-user/binfmt in digest-pinned GNU/musl riscv64 containers because no native GitHub runner is available. These rows SHALL be identified as emulated host-kernel semantic checks, not native riscv64 performance/kernel evidence. Linux-first development SHALL be an ordering choice, not a released reduction of scope. An unfinished backend SHALL appear as failed/incomplete development CI, not a false passing release result.
+
+#### Scenario: riscv64 GNU and musl execute under emulation
+- **WHEN** their standalone fixtures run in CI
+- **THEN** logs/docs identify them as “emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative”
+- **AND** assertions about identity, ordering, liveness and completion remain unchanged
+- **AND** any necessary wider emulated timing budget uses a documented row-only scale factor without changing native deadlines
+
+#### Scenario: qemu-user lacks a native runtime capability
+- **WHEN** a seccomp installation probe returns ENOSYS or std spawn of a known-missing path returns a child exiting 127 in an explicitly declared emulated test executor
+- **THEN** the affected case reports `EMULATOR-UNSUPPORTED`, not a product pass, and job summaries count/list it
+- **AND** selection is runtime-probed, never based on `target_arch`, with unchanged native/other assertions and no product-code workaround
+- **AND** a full-system riscv64 VM job remains a follow-up for complete coverage
 
 #### Scenario: Early skeleton lacks a backend
 - **WHEN** the first compiling skeleton reaches the full CI matrix before all backends work

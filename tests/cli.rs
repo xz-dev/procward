@@ -61,20 +61,24 @@ struct Run {
 }
 
 impl Run {
-    fn start(mut command: Command) -> Self {
+    fn start(command: Command) -> Self {
+        Self::try_start(command).unwrap()
+    }
+
+    fn try_start(mut command: Command) -> io::Result<Self> {
         // Nested procward owns normal reaping; this test-only reaper catches failed-run rescues.
-        set_child_subreaper(Some(Pid::INIT)).unwrap();
-        Self {
+        set_child_subreaper(Some(Pid::INIT))
+            .map_err(|error| io::Error::other(format!("harness reaper setup failed: {error}")))?;
+        Ok(Self {
             child: Some(
                 command
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap(),
+                    .spawn()?,
             ),
             fixtures: Vec::new(),
-        }
+        })
     }
 
     fn fixture(mode: &str, dir: &Path) -> Self {
@@ -201,6 +205,14 @@ impl Drop for Run {
             assert!(thread::panicking(), "fixture required harness rescue");
         }
     }
+}
+
+fn emulator_unsupported(case: &str, reason: &str) -> bool {
+    if std::env::var_os("PROCWARD_TEST_QEMU_USER").as_deref() != Some(OsStr::new("1")) {
+        return false;
+    }
+    println!("\nEMULATOR-UNSUPPORTED: {case}: {reason}");
+    true
 }
 
 fn poll(mut condition: impl FnMut() -> bool) {
@@ -399,6 +411,33 @@ fn rejected_cli_causes_no_payload_side_effects() {
 #[test]
 fn exec_failures_are_visible_without_falling_back_to_shell() {
     let dir = Scratch::new();
+    let missing_probe = dir.0.join("known-missing-spawn-capability-probe");
+    assert!(!missing_probe.try_exists().unwrap());
+    match Command::new(&missing_probe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(mut child) => {
+            poll(|| child.try_wait().unwrap().is_some());
+            let status = child.wait().unwrap();
+            assert_eq!(
+                status.code(),
+                Some(127),
+                "unexpected missing-path spawn probe: {status}"
+            );
+            if emulator_unsupported(
+                "exec_failures_are_visible_without_falling_back_to_shell",
+                "std spawn of a known-missing path returned a child exiting 127; qemu-user vfork/posix_spawn cannot report exec errors",
+            ) {
+                return;
+            }
+            panic!("native std spawn failed to report a missing executable");
+        }
+        Err(error) => panic!("missing-path spawn probe failed unexpectedly: {error}"),
+    }
     let marker = dir.0.join("payload");
     let plain_text = dir.0.join("not-an-executable-image");
     fs::write(&plain_text, format!("touch {}\n", marker.display())).unwrap();
@@ -422,7 +461,7 @@ fn exec_failures_are_visible_without_falling_back_to_shell() {
 
 #[test]
 fn ordinary_exit_codes_are_preserved() {
-    for code in [0, 1, 23, 125, 255] {
+    for code in [0, 1, 23, 125, 127, 255] {
         let mut cmd = command();
         cmd.arg("run")
             .arg("--")
@@ -735,20 +774,37 @@ fn denied_parent_death_wake_refuses_payload_before_side_effects() {
                 len: filter.len() as u16,
                 filter: filter.as_ptr().cast_mut(),
             };
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                || libc::syscall(
-                    libc::SYS_seccomp,
-                    libc::SECCOMP_SET_MODE_FILTER,
-                    0,
-                    &program,
-                ) != 0
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                // Distinguish a missing prerequisite from seccomp's ENOSYS capability result.
+                return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+            }
+            if libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                0,
+                &program,
+            ) != 0
             {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    let output = Run::start(cmd).finish();
+    let mut run = match Run::try_start(cmd) {
+        Ok(run) => run,
+        Err(error)
+            if error.raw_os_error() == Some(libc::ENOSYS)
+                && emulator_unsupported(
+                    "denied_parent_death_wake_refuses_payload_before_side_effects",
+                    "seccomp installation returned ENOSYS under qemu-user",
+                ) =>
+        {
+            assert!(!marker.try_exists().unwrap());
+            return;
+        }
+        Err(error) => panic!("required-wake denial probe failed unexpectedly: {error}"),
+    };
+    let output = run.finish();
     assert_eq!(output.status.code(), Some(125), "{output:?}");
     assert!(!marker.try_exists().unwrap());
     assert!(

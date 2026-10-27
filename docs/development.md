@@ -86,8 +86,11 @@ Repository metadata was verified with
 `https://github.com/xz-dev/procward`, exact design description and all 13 topics.
 No settings, tags or releases were changed during backend implementation.
 
-All pushes and pull requests run ten rows: GNU/musl Linux x64/arm64, FreeBSD
-x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. No path/branch filters,
+All pushes and pull requests now require twelve rows: GNU/musl Linux
+x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64.
+The riscv64 rows use pinned qemu-user/binfmt and digest-pinned target containers;
+see [platforms.md](platforms.md) for the host-kernel/timing limitation. No
+path/branch filters,
 fail-fast or newer-event cancellation. Actual source SHA, executor, compiler host
 and fixture results appear in ordinary logs. Alpine's `*-alpine-linux-musl`
 vendor alias maps to its native `*-unknown-linux-musl` row label.
@@ -125,7 +128,7 @@ filed. Parent/user approval is needed before filing, and vendors should be
 removed once upstream ships fixes. Original licences and modification notices
 are preserved; [licensing.md](licensing.md) lists all 64 locked crate/versions.
 
-## Section 2–3 checkpoint
+## Original ten-row section 2–3 checkpoint
 
 Code commit `eb8ca7d`: [run 40545740279](https://github.com/xz-dev/procward/actions/runs/40545740279)
 completed **success on all ten rows**, with real fixture execution:
@@ -144,8 +147,10 @@ completed **success on all ten rows**, with real fixture execution:
 | aarch64-pc-windows-msvc | success, console and ConPTY |
 
 This is an ordinary development checkpoint, not release acceptance or a sealed
-artifact packet. Subsequent documentation-only pushes still run the full matrix.
-Tasks 1–3 are complete (14/34); sections 4–7 remain, including interactive Unix
+artifact packet. The later binding riscv64 addition expands the requirement to
+12 rows and reopens task 2.2 until both emulated GNU/musl fixture rows pass.
+Subsequent documentation-only pushes still run the full matrix.
+At that ten-row checkpoint, tasks 1–3 were complete (14/34); sections 4–7 remained, including interactive Unix
 job control, application/task contracts, release setup/review, owner-controlled
 release prerequisites and later pi integration. No tag, release, repository
 setting or pi/pi-env code was changed in this slice.

@@ -106,6 +106,13 @@ jobs:
             image: alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      PROCWARD_CI_TARGET: ${{ matrix.target }}
+      PROCWARD_CI_IMAGE: ${{ matrix.image }}
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: bash .github/scripts/run-riscv64.sh
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER: bash .github/scripts/run-riscv64.sh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -114,25 +121,31 @@ jobs:
         with:
           platforms: riscv64
           image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-      - name: Emulated riscv64 build and full fixture execution
+      - name: Official cross toolchain and target runtime
         run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustup target add '${{ matrix.target }}'
+          rustc -vV
+          rustup target list --installed | grep -Fx '${{ matrix.target }}'
+          echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld" >> "$GITHUB_ENV"
+          if [ '${{ matrix.libc }}' = gnu ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          fi
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
-          docker run --rm --platform linux/riscv64 -v "$PWD:/src" -w /src \
-            -e PROCWARD_CI_LIBC='${{ matrix.libc }}' -e PROCWARD_CI_TARGET='${{ matrix.target }}' \
-            -e CARGO_TARGET_DIR='/src/target/riscv64-${{ matrix.libc }}' -e RUST_TEST_THREADS=1 \
-            '${{ matrix.image }}' sh -ec '
-              if [ "$PROCWARD_CI_LIBC" = gnu ]; then
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y --no-install-recommends cargo rustc gcc libc6-dev ca-certificates git
-              else
-                apk add --no-cache cargo rust musl-dev gcc ca-certificates git
-              fi
-              git -c safe.directory=/src rev-parse HEAD
-              uname -m
-              rustc -vV
-              test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "$PROCWARD_CI_TARGET"
-              cargo build --locked --bins --examples
-              cargo test --locked --all-targets -- --nocapture
-            '
+          docker run --rm --platform linux/riscv64 '${{ matrix.image }}' uname -m
+      - name: Cross-build exact release target and fixtures
+        run: |
+          cargo build --locked --release --target '${{ matrix.target }}' --bins --examples
+          file 'target/${{ matrix.target }}/release/procward' 'target/${{ matrix.target }}/release/examples/fixture'
+          readelf -h 'target/${{ matrix.target }}/release/procward' | grep 'Machine:.*RISC-V'
+      - name: Full suite against emulated release binaries
+        id: fixtures
+        run: |
+          set -o pipefail
+          cargo test --locked --release --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
+      - name: Count and list emulator-unsupported cases
+        if: always()
+        run: python3 .github/scripts/emulation-summary.py '${{ matrix.target }}' '${{ steps.fixtures.outcome }}' "$RUNNER_TEMP/riscv-fixtures.log"

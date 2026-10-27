@@ -221,6 +221,8 @@ As soon as the Linux skeleton compiles, create/use the GitHub repository, push i
 | aarch64-unknown-linux-gnu | Linux arm64 GNU | linux-arm64-gnu |
 | x86_64-unknown-linux-musl | Matching-arch musl container | linux-x64-musl-baseline/modern |
 | aarch64-unknown-linux-musl | Matching-arch musl container | linux-arm64-musl |
+| riscv64gc-unknown-linux-gnu | Pinned Debian riscv64 container through pinned qemu-user/binfmt on Linux x64 | standalone asset; pi label mapping not claimed |
+| riscv64gc-unknown-linux-musl | Pinned Alpine riscv64 container through pinned qemu-user/binfmt on Linux x64 | standalone asset; pi label mapping not claimed |
 | x86_64-unknown-freebsd | Pinned vmactions/freebsd-vm, x64 guest | freebsd-x64 |
 | aarch64-unknown-freebsd | Same VM action, declared arm64 guest/emulation | freebsd-arm64 |
 | x86_64-apple-darwin | macOS x64 | darwin-x64-baseline/modern |
@@ -228,7 +230,32 @@ As soon as the Linux skeleton compiles, create/use the GitHub repository, push i
 | x86_64-pc-windows-msvc | Windows x64, console/ConPTY | windows-x64-baseline/modern |
 | aarch64-pc-windows-msvc | Windows arm64, console/ConPTY | windows-arm64 |
 
-Ten Rust triples cover four OS families and the later 14 pi labels; do not create fake extra Rust CPU backends. Build-only/cross-compile does not replace runtime tests. Setup budgets may account for guest startup but fault teardown stays ≤8 seconds. Behaviour-driven interactions act → observe effect/not-ready hint → retry while not ready; silence fails by deadline and endless hints cannot extend the overall bound. Polling observations is allowed; sleeps must not sequence input. A stopped identity is alive, a zombie is unreaped, and a failed query is not absence. If a harness rescues a survivor, the test still failed.
+Twelve Rust triples cover four OS families, the existing 14 pi labels and two
+additional standalone riscv64 release assets; do not invent extra CPU backends
+or claim a new pi runtime mapping. Both riscv64 rows are **emulated (qemu-user) —
+semantics of prctl/pidfd/process groups are passed through to the host kernel;
+timings are not representative**. GitHub has no native riscv64 runner. Use pinned
+`docker/setup-qemu-action` plus a digest-pinned binfmt image and digest-pinned
+Debian GNU/Alpine musl riscv64 containers, cross-building release-profile binaries
+and tests with the official rustup target triple before executing them there.
+Do not map Alpine's `riscv64-alpine-linux-musl` compiler alias to the requested
+release target. Pin existing native musl images too.
+Print source/target/executor/toolchain and the emulation caveat. Current timing
+scale is 1×: no deadlines or assertions are relaxed. If emulation needs a wider
+budget, document an explicit emulated-row-only scale, preserve ordering/identity/
+completion assertions and configured-deadline-relative checks, and keep native
+budgets unchanged. Release assets, checksums and attestations must include both
+riscv64 GNU and musl outputs.
+
+qemu-user lacks seccomp installation and can break libc vfork/posix_spawn
+exec-error reporting. Runtime capability probes, never `target_arch`, identify
+these limitations only in explicitly marked emulated test executors. Report
+`EMULATOR-UNSUPPORTED` for affected cases and count/list them in job summaries;
+never call them product passes, reinterpret 127 as success, change product code
+for emulation or weaken other/native assertions. Full-system riscv64
+`qemu-system` CI is a follow-up for complete coverage of these cases.
+
+Build-only/cross-compile does not replace runtime tests. Setup budgets may account for guest startup but native fault teardown stays ≤8 seconds. Behaviour-driven interactions act → observe effect/not-ready hint → retry while not ready; silence fails by deadline and endless hints cannot extend the overall bound. Polling observations is allowed; sleeps must not sequence input. A stopped identity is alive, a zombie is unreaped, and a failed query is not absence. If a harness rescues a survivor, the test still failed.
 
 Before first tag, get **one independent review** of actual code, crate assumptions/gaps, safety tests and release setup, fix blocking findings and obtain a complete passing matrix. Do not require independent reviews before every small implementation step or early push. No review or runtime pass is claimed by this planning document.
 
