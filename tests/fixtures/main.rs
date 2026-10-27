@@ -17,6 +17,8 @@ fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
         #[cfg(windows)]
+        "conpty-bootstrap" => windows::conpty_bootstrap(&args[2]),
+        #[cfg(windows)]
         "console" => windows::interactive(),
         #[cfg(windows)]
         "console-host" => windows::console_host(&args[2], Path::new(&args[3])),

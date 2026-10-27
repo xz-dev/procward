@@ -29,6 +29,31 @@ unsafe extern "system" fn ignore(_: u32) -> i32 {
     1
 }
 
+pub fn conpty_bootstrap(procward: &OsStr) {
+    assert_ne!(unsafe { SetConsoleCtrlHandler(Some(ignore), 1) }, 0);
+    // Native CreateProcess from a redirected test host retains that host's std handles.
+    let input = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    let output = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+        .unwrap();
+    let status = Command::new(procward)
+        .args(["run", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .arg("console")
+        .stdin(input)
+        .stdout(output.try_clone().unwrap())
+        .stderr(output)
+        .status()
+        .unwrap();
+    process::exit(status.code().unwrap());
+}
+
 pub fn interactive() {
     assert_ne!(unsafe { SetConsoleCtrlHandler(Some(control), 1) }, 0);
     println!("READY");

@@ -92,9 +92,9 @@ impl Console {
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         startup.lpAttributeList = list;
         let command = format!(
-            "\"{}\" run -- \"{}\" console",
-            env!("CARGO_BIN_EXE_procward"),
-            fixture().display()
+            "\"{}\" conpty-bootstrap \"{}\"",
+            fixture().display(),
+            env!("CARGO_BIN_EXE_procward")
         );
         let mut wide: Vec<u16> = command.encode_utf16().chain([0]).collect();
         let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
