@@ -17,19 +17,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
+pub fn run_owned(
+    command: &OsStr,
+    args: &[OsString],
+    lease: &rustix::fd::OwnedFd,
+) -> io::Result<u8> {
     // rustix 1.1.6 represents this boolean prctl argument as Option<Pid>: Some(1) enables it.
     process::set_child_subreaper(Some(Pid::INIT))?;
     let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
     fs::read_to_string("/proc/thread-self/children")?;
     let mut command = Command::new(command);
     command.args(args);
+    if !crate::owner::alive(lease)? {
+        return Err(io::Error::other(
+            "owner lost before payload launch permission",
+        ));
+    }
+    // No pre_exec on the untrusted command: libc execvp would add an ENOEXEC shell fallback.
     let child = CommandWrap::from(command)
         .wrap(ProcessGroup::leader())
         .spawn()?;
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
     let mut inventory = Inventory::new();
-    let result = observe_primary(child.as_ref(), primary, &mut signals, &mut inventory);
+    let result = observe_primary(child.as_ref(), primary, &mut signals, &mut inventory, lease);
     let cleanup = cleanup(&mut inventory);
     cleanup?;
     let status = result?;
@@ -44,8 +54,12 @@ fn observe_primary(
     primary: Pid,
     signals: &mut Signals,
     inventory: &mut Inventory,
+    lease: &rustix::fd::OwnedFd,
 ) -> io::Result<WaitIdStatus> {
     loop {
+        if !crate::owner::alive(lease)? {
+            return Err(io::Error::other("owner lease ended"));
+        }
         inventory.refresh()?;
         match process::waitid(
             WaitId::Pid(primary),
@@ -76,7 +90,7 @@ fn reap_adopted(primary: Pid, inventory: &mut Inventory) -> io::Result<()> {
     Ok(())
 }
 
-fn cleanup(inventory: &mut Inventory) -> io::Result<()> {
+pub(crate) fn cleanup(inventory: &mut Inventory) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_millis(7500);
     loop {
         inventory.refresh()?;

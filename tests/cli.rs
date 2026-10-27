@@ -11,7 +11,7 @@ use rustix::{
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::{ffi::OsStringExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -115,8 +115,43 @@ impl Run {
     }
 
     fn finish(&mut self) -> Output {
-        poll(|| self.child.as_mut().unwrap().try_wait().unwrap().is_some());
-        self.child.take().unwrap().wait_with_output().unwrap()
+        // Drain both pipes concurrently; an exited owner is not transport completion.
+        let child = self.child.as_mut().unwrap();
+        drop(child.stdin.take());
+        let (send, recv) = std::sync::mpsc::channel();
+        let mut stdout = child.stdout.take().unwrap();
+        let out_send = send.clone();
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = out_send.send((true, result));
+        });
+        let mut stderr = child.stderr.take().unwrap();
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stderr.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = send.send((false, result));
+        });
+        let mut out = None;
+        let mut err = None;
+        let mut status = None;
+        poll(|| {
+            for (is_out, result) in recv.try_iter() {
+                if is_out {
+                    out = Some(result.unwrap());
+                } else {
+                    err = Some(result.unwrap());
+                }
+            }
+            status = child.try_wait().unwrap();
+            status.is_some() && out.is_some() && err.is_some()
+        });
+        self.child.take().unwrap().wait().unwrap();
+        Output {
+            status: status.unwrap(),
+            stdout: out.unwrap(),
+            stderr: err.unwrap(),
+        }
     }
 }
 
@@ -280,7 +315,19 @@ fn healthy_primary_does_not_retain_adopted_zombies() {
     let mut run = Run::fixture("orphan", &dir.0);
     let primary = run.remember(&dir.0, "orphan");
     let orphan = run.remember(&dir.0, "orphan-child");
-    let owner = run.child.as_ref().unwrap().id();
+    let owner = fs::read_to_string(format!("/proc/{primary}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PPid:\t")
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .unwrap();
+    assert_ne!(
+        owner,
+        run.child.as_ref().unwrap().id(),
+        "independent anchor owns payload"
+    );
     poll(|| dir.0.join("ready").try_exists().unwrap());
     poll(|| {
         let status = fs::read_to_string(format!("/proc/{orphan}/status")).unwrap();
@@ -435,4 +482,141 @@ fn stale_pidfd_cannot_signal_later_unrelated_work() {
     );
     unrelated.release_primary();
     assert!(unrelated.finish().status.success());
+}
+
+#[test]
+fn owner_death_wakes_paused_anchor_and_cleans_detached_stopped_work() {
+    let dir = Scratch::new();
+    let mut run = Run::fixture("detached-tree", &dir.0);
+    let primary = run.remember(&dir.0, "detached-tree");
+    let branch = run.remember(&dir.0, "detached-branch");
+    let worker = run.remember(&dir.0, "stopped-worker");
+    let anchor_pid = fs::read_to_string(format!("/proc/{primary}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PPid:\t")
+                .and_then(|s| s.parse::<i32>().ok())
+        })
+        .unwrap();
+    let anchor = pidfd_open(Pid::from_raw(anchor_pid).unwrap(), PidfdFlags::empty()).unwrap();
+    run.fixtures.push(rustix::io::dup(&anchor).unwrap());
+    let owner = pidfd_open(
+        Pid::from_raw(run.child.as_ref().unwrap().id() as i32).unwrap(),
+        PidfdFlags::empty(),
+    )
+    .unwrap();
+    for fd in [&run.fixtures[0], &run.fixtures[1], &anchor, &owner] {
+        pidfd_send_signal(fd, Signal::STOP).unwrap();
+    }
+    poll(|| {
+        fs::read_to_string(format!("/proc/{anchor_pid}/status"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("State:\tT"))
+    });
+    let fault = Instant::now();
+    pidfd_send_signal(&owner, Signal::KILL).unwrap();
+    let output = run.finish();
+    assert!(
+        !output.status.success(),
+        "owner death cannot report primary success"
+    );
+    for pid in [primary, branch, worker] {
+        poll(|| absent(pid));
+    }
+    poll(|| {
+        match waitid(
+            WaitId::PidFd(anchor.as_fd()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) | Err(rustix::io::Errno::INTR) => false,
+            result => panic!("anchor completion query failed: {result:?}"),
+        }
+    });
+    assert!(
+        fault.elapsed() <= Duration::from_secs(8),
+        "fault-relative teardown: {:?}",
+        fault.elapsed()
+    );
+}
+
+#[test]
+fn malformed_private_launch_refuses_payload() {
+    let dir = Scratch::new();
+    let marker = dir.0.join("payload");
+    let mut cmd = command();
+    cmd.arg("__anchor")
+        .arg(std::process::id().to_string())
+        .arg("999999")
+        .arg(fixture())
+        .arg("touch")
+        .arg(&marker);
+    let output = Run::start(cmd).finish();
+    assert_eq!(output.status.code(), Some(125));
+    assert!(!marker.try_exists().unwrap());
+}
+
+#[test]
+fn launch_gate_eof_and_failed_parent_recheck_deny_payload() {
+    use rustix::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    for stale_parent in [false, true] {
+        let dir = Scratch::new();
+        let marker = dir.0.join("payload");
+        let (read, write) = rustix::pipe::pipe_with(
+            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+        )
+        .unwrap();
+        let raw = read.as_raw_fd();
+        let mut cmd = command();
+        cmd.arg("__anchor")
+            .arg(if stale_parent { 1 } else { std::process::id() }.to_string())
+            .arg(raw.to_string())
+            .arg(fixture())
+            .arg("touch")
+            .arg(&marker);
+        unsafe {
+            cmd.pre_exec(move || {
+                rustix::io::fcntl_setfd(
+                    rustix::fd::BorrowedFd::borrow_raw(raw),
+                    rustix::io::FdFlags::empty(),
+                )?;
+                Ok(())
+            });
+        }
+        let mut run = Run::start(cmd);
+        drop(read);
+        drop(write);
+        let output = run.finish();
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        assert!(!marker.try_exists().unwrap());
+    }
+}
+
+#[test]
+fn surviving_owner_cleans_tree_when_anchor_is_killed() {
+    let dir = Scratch::new();
+    let mut run = Run::fixture("detached-tree", &dir.0);
+    let primary = run.remember(&dir.0, "detached-tree");
+    let branch = run.remember(&dir.0, "detached-branch");
+    let worker = run.remember(&dir.0, "stopped-worker");
+    let anchor_pid = fs::read_to_string(format!("/proc/{primary}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PPid:\t")
+                .and_then(|s| s.parse::<i32>().ok())
+        })
+        .unwrap();
+    let anchor = pidfd_open(Pid::from_raw(anchor_pid).unwrap(), PidfdFlags::empty()).unwrap();
+    let fault = Instant::now();
+    pidfd_send_signal(&anchor, Signal::KILL).unwrap();
+    let output = run.finish();
+    assert_eq!(output.status.code(), Some(125), "{output:?}");
+    for pid in [primary, branch, worker] {
+        assert!(absent(pid), "owned survivor {pid}");
+    }
+    assert!(fault.elapsed() <= Duration::from_secs(8));
 }
