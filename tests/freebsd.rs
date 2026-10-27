@@ -44,7 +44,6 @@ struct Run {
 }
 impl Run {
     fn new(mode: &str, serial: usize) -> Self {
-        process::set_reaper_status(true).unwrap();
         let dir =
             std::env::temp_dir().join(format!("procward-freebsd-{}-{serial}", std::process::id()));
         fs::create_dir(&dir).unwrap();
@@ -117,6 +116,7 @@ fn wait_file(path: &Path) {
 
 #[test]
 fn freebsd_reaper_lifecycle_and_targeted_parent_death_wake() {
+    process::set_reaper_status(true).unwrap();
     // One sequential scenario group: this process's rescue reaper owns no other test's work.
     {
         let mut run = Run::new("detached-tree", 0);
