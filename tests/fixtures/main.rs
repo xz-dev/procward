@@ -142,8 +142,9 @@ fn main() {
                     )
                     .unwrap();
                     loop {
+                        let record = dir.join("order-observed.tmp");
                         fs::write(
-                            dir.join("order-observed"),
+                            &record,
                             format!(
                                 "{} {}",
                                 term.load(Ordering::SeqCst),
@@ -151,6 +152,7 @@ fn main() {
                             ),
                         )
                         .unwrap();
+                        fs::rename(record, dir.join("order-observed")).unwrap();
                         thread::park_timeout(Duration::from_millis(5));
                     }
                 }
