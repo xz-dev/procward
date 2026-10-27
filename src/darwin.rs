@@ -57,10 +57,15 @@ fn query(pid: Pid) -> io::Result<Option<BSDInfo>> {
             let query_errno = errno::errno().0;
             match process::test_kill_process(pid) {
                 Err(Errno::SRCH) => Ok(None),
-                Ok(()) if query_errno == Errno::SRCH.raw_os_error() => Err(io::Error::new(io::ErrorKind::WouldBlock, format!("process {pid} still exists but libproc has no identity yet"))),
-                _ => Err(io::Error::other(format!("libproc identity query for {pid} failed: {message}"))),
+                Ok(()) if query_errno == Errno::SRCH.raw_os_error() => Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("process {pid} still exists but libproc has no identity yet"),
+                )),
+                _ => Err(io::Error::other(format!(
+                    "libproc identity query for {pid} failed: {message}"
+                ))),
             }
-        },
+        }
     }
 }
 
@@ -87,12 +92,14 @@ impl Inventory {
         for pid in &self.1 {
             match query(*pid) {
                 Ok(None) => absent.push(*pid),
-                Ok(Some(_)) => {},
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                Ok(Some(_)) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
         }
-        for pid in absent { self.1.remove(&pid); }
+        for pid in absent {
+            self.1.remove(&pid);
+        }
         let mut pending: Vec<_> = self.0.keys().copied().chain([root]).collect();
         let mut visited = HashSet::new();
         while let Some(parent) = pending.pop() {
@@ -101,7 +108,10 @@ impl Inventory {
             }
             let before = match query(parent) {
                 Ok(Some(info)) => info,
-                Ok(None) => { self.0.remove(&parent); continue; },
+                Ok(None) => {
+                    self.0.remove(&parent);
+                    continue;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
@@ -120,9 +130,13 @@ impl Inventory {
                 let pid = Pid::from_raw(raw as i32)
                     .ok_or_else(|| io::Error::other("invalid libproc child PID"))?;
                 match query(pid) {
-                    Ok(Some(info)) if info.pbi_ppid == before.pid => observed.push((pid, Identity::from_info(&info))),
-                    Ok(_) => {},
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => { self.1.insert(pid); },,
+                    Ok(Some(info)) if info.pbi_ppid == before.pid => {
+                        observed.push((pid, Identity::from_info(&info)))
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.1.insert(pid);
+                    }
                     Err(error) => return Err(error),
                 }
             }
