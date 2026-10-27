@@ -117,7 +117,6 @@ impl Run {
     fn finish(&mut self) -> Output {
         // Drain both pipes concurrently; an exited owner is not transport completion.
         let child = self.child.as_mut().unwrap();
-        drop(child.stdin.take());
         let (send, recv) = std::sync::mpsc::channel();
         let mut stdout = child.stdout.take().unwrap();
         let out_send = send.clone();
@@ -144,6 +143,9 @@ impl Run {
                 }
             }
             status = child.try_wait().unwrap();
+            if status.is_some() {
+                drop(child.stdin.take());
+            }
             status.is_some() && out.is_some() && err.is_some()
         });
         self.child.take().unwrap().wait().unwrap();
@@ -618,5 +620,51 @@ fn surviving_owner_cleans_tree_when_anchor_is_killed() {
     for pid in [primary, branch, worker] {
         assert!(absent(pid), "owned survivor {pid}");
     }
+    assert!(fault.elapsed() <= Duration::from_secs(8));
+}
+
+#[test]
+fn stopped_adoption_receives_term_then_one_cont_with_one_six_second_policy() {
+    let dir = Scratch::new();
+    let mut run = Run::fixture("cleanup-order", &dir.0);
+    run.remember(&dir.0, "cleanup-order");
+    let worker = run.remember(&dir.0, "order-worker");
+    poll(|| dir.0.join("order-ready").try_exists().unwrap());
+    poll(|| {
+        fs::read_to_string(format!("/proc/{worker}/status"))
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("State:\tT"))
+    });
+    let start = Instant::now();
+    run.release_primary();
+    let output = run.finish();
+    assert_eq!(output.status.code(), Some(23), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.0.join("order-observed")).unwrap(),
+        "true 1"
+    );
+    assert!(absent(worker));
+    assert!(start.elapsed() >= Duration::from_secs(6));
+    assert!(start.elapsed() <= Duration::from_secs(8));
+}
+
+#[test]
+fn ignoring_term_cannot_hold_cleanup_past_fault_deadline() {
+    let dir = Scratch::new();
+    let mut run = Run::fixture("stubborn", &dir.0);
+    let primary = run.remember(&dir.0, "stubborn");
+    poll(|| dir.0.join("ready").try_exists().unwrap());
+    let owner = pidfd_open(
+        Pid::from_raw(run.child.as_ref().unwrap().id() as i32).unwrap(),
+        PidfdFlags::empty(),
+    )
+    .unwrap();
+    let fault = Instant::now();
+    pidfd_send_signal(&owner, Signal::TERM).unwrap();
+    let output = run.finish();
+    assert_eq!(output.status.code(), Some(137), "{output:?}");
+    assert!(absent(primary));
+    assert!(fault.elapsed() >= Duration::from_secs(6));
     assert!(fault.elapsed() <= Duration::from_secs(8));
 }

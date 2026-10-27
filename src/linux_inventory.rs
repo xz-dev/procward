@@ -2,11 +2,16 @@
 use rustix::{
     fd::OwnedFd,
     io::Errno,
-    process::{self, Pid, PidfdFlags, Signal},
+    process::{self, Pid, PidfdFlags},
 };
 use std::{collections::HashMap, fs, io};
 
-pub struct Inventory(HashMap<Pid, Option<OwnedFd>>);
+pub struct Inventory(HashMap<Pid, Target>);
+
+struct Target {
+    fd: Option<OwnedFd>,
+    term_sent: bool,
+}
 
 impl Inventory {
     pub fn new() -> Self {
@@ -17,21 +22,26 @@ impl Inventory {
         // Unreaped direct children cannot be reused; detached descendants enter here on adoption.
         for pid in children()? {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.0.entry(pid) {
-                entry.insert(open_identity(pid)?);
+                entry.insert(Target {
+                    fd: open_identity(pid)?,
+                    term_sent: false,
+                });
             }
         }
         Ok(())
     }
 
-    pub fn signal(&self, signal: Signal) -> io::Result<()> {
-        for (pid, fd) in &self.0 {
-            let result = match fd {
-                Some(fd) => process::pidfd_send_signal(fd, signal),
-                None => process::kill_process(*pid, signal),
-            };
-            match result {
-                Ok(()) | Err(Errno::SRCH) => {}
-                Err(error) => return Err(error.into()),
+    pub fn advance(&mut self, phase: crate::policy::Phase) -> io::Result<()> {
+        for (pid, target) in &mut self.0 {
+            for signal in crate::policy::next_signals(phase, &mut target.term_sent) {
+                let result = match &target.fd {
+                    Some(fd) => process::pidfd_send_signal(fd, *signal),
+                    None => process::kill_process(*pid, *signal),
+                };
+                match result {
+                    Ok(()) | Err(Errno::SRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         Ok(())

@@ -34,6 +34,61 @@ fn main() {
             fs::write(dir.join(format!("{mode}.pid")), process::id().to_string()).unwrap();
             match mode {
                 #[cfg(target_os = "linux")]
+                "cleanup-order" => {
+                    let _worker = spawn("order-worker", dir);
+                    wait_for(&dir.join("order-ready"));
+                    wait_for_input();
+                    process::exit(23);
+                }
+                #[cfg(target_os = "linux")]
+                "order-worker" => {
+                    use std::sync::{
+                        Arc,
+                        atomic::{AtomicBool, AtomicUsize, Ordering},
+                    };
+                    let term = Arc::new(AtomicBool::new(false));
+                    signal_hook::flag::register(signal_hook::consts::SIGTERM, term.clone())
+                        .unwrap();
+                    let cont = Arc::new(AtomicUsize::new(0));
+                    let seen = cont.clone();
+                    unsafe {
+                        signal_hook::low_level::register(signal_hook::consts::SIGCONT, move || {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .unwrap();
+                    }
+                    fs::write(dir.join("order-ready"), b"ready").unwrap();
+                    rustix::process::kill_process(
+                        rustix::process::getpid(),
+                        rustix::process::Signal::STOP,
+                    )
+                    .unwrap();
+                    loop {
+                        fs::write(
+                            dir.join("order-observed"),
+                            format!(
+                                "{} {}",
+                                term.load(Ordering::SeqCst),
+                                cont.load(Ordering::SeqCst)
+                            ),
+                        )
+                        .unwrap();
+                        thread::park_timeout(Duration::from_millis(5));
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                "stubborn" => {
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                    fs::write(dir.join("ready"), b"ready").unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
+                #[cfg(target_os = "linux")]
                 "detached-tree" => {
                     let _branch = spawn("detached-branch", dir);
                     wait_for(&dir.join("stopped-worker.pid"));

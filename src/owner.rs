@@ -13,7 +13,7 @@ use signal_hook::{
 use std::{
     ffi::{OsStr, OsString},
     io,
-    os::unix::process::CommandExt,
+    os::unix::process::{CommandExt, ExitStatusExt},
     process::Command,
     thread,
     time::Duration,
@@ -49,7 +49,12 @@ pub fn run(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
         if let Some(status) = anchor.try_wait()? {
             drop(write);
             // Anchor loss is fatal even when it occurred before publishing any primary result.
-            let cleanup = crate::linux::cleanup(&mut Inventory::new());
+            let cleanup = crate::linux::cleanup(
+                &mut Inventory::new(),
+                None,
+                &mut None,
+                status.signal().is_some(),
+            );
             cleanup?;
             return Ok(status.code().unwrap_or(125) as u8);
         }
