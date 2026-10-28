@@ -15,15 +15,23 @@ Pi integration SHALL be a normal pi change after procward's independently tested
 - **WHEN** pi cannot use its required binary/contract
 - **THEN** startup fails visibly with the explicit opt-out diagnostic rather than silently running unmanaged
 
-### Requirement: Avoid accidental session nesting
-Pi SHALL recognize a versioned live direct-primary handoff validated against its immediate native guardian and SHALL NOT wrap that primary again. Environment strings alone SHALL NOT prove managed state. Stale/incomplete handoffs SHALL fail closed. Arbitrary-descendant discovery SHALL remain outside v0.1.0; deliberate per-task scopes SHALL remain possible.
+### Requirement: Nest ownership by default
+Pi SHALL add its own ownership layer when launched under another pi or any external procward, including as a direct managed primary. Only the launcher's `--no-process-ownership` or `PI_NO_PROCESS_OWNERSHIP=1` SHALL disable pi's layer. Pi SHALL skip wrapping only for its own bootstrap handoff, identified by its private one-shot marker together with a valid versioned READY record matched to its live immediate native parent. External managed metadata or environment strings alone SHALL NOT suppress wrapping. Stale/incomplete bootstrap handoffs SHALL fail closed.
 
 #### Scenario: User runs procward around pi
-- **WHEN** `procward run -- pi` launches pi as a validated direct managed primary
-- **THEN** pi accepts the handoff and starts no second session wrapper
+- **WHEN** `procward run -- pi` launches pi as a validated direct managed primary without an explicit ownership opt-out
+- **THEN** pi adds its own procward layer rather than treating external readiness as its bootstrap handoff
 
-#### Scenario: Marker names a stale owner
-- **WHEN** managed metadata disagrees with the live handoff or immediate-parent relationship
+#### Scenario: Pi launches another pi
+- **WHEN** pi starts another pi with ownership enabled
+- **THEN** the nested pi adds its own ownership layer
+
+#### Scenario: Pi reenters through its own bootstrap
+- **WHEN** pi receives its private one-shot bootstrap marker and a valid READY record for that handoff
+- **THEN** it consumes the marker and starts the full CLI without adding another layer for that same bootstrap
+
+#### Scenario: Bootstrap marker names a stale owner
+- **WHEN** bootstrap metadata disagrees with the live READY record or immediate-parent relationship
 - **THEN** pi rejects it before application side effects
 
 ### Requirement: Preserve pi ownership opt-outs

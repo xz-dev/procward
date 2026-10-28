@@ -15,6 +15,25 @@ Procward SHALL support `procward run [options] -- <cmd> [args...]`, execute argv
 - **WHEN** an owner is killed while its tree contains running and stopped descendants and an independent cleanup role survives
 - **THEN** the tree is cleaned up within the teardown bound without requiring `fg` or cooperation from the command
 
+### Requirement: Support nested ownership
+`procward run` inside another procward-managed tree SHALL add an independent ownership layer by default. Both layers SHALL preserve the payload result after successful cleanup. Outer-owner loss SHALL clean the whole nested tree within the outer configured deadline, and inner-owner loss SHALL clean the inner subtree while the outer layer reports its primary's native result. The inner payload SHALL receive only the inner contract metadata and SHALL NOT inherit the outer lifecycle fd/HANDLE. macOS SHALL retain its documented observed-tree best-effort boundary rather than claim kernel containment.
+
+#### Scenario: Nested payload exits
+- **WHEN** `procward run -- procward run -- <fixture tree>` has a payload that exits 23 with descendants still running
+- **THEN** both layers report 23 after cleanup and no owned process survives within the platform's documented guarantee
+
+#### Scenario: Outer owner is lost
+- **WHEN** the outer owner is killed after nested startup
+- **THEN** its surviving cleanup role or kernel Job cleans the inner layer and its descendants within the outer configured deadline
+
+#### Scenario: Inner owner is lost
+- **WHEN** the inner owner is killed after nested startup
+- **THEN** its subtree is cleaned and the outer layer reports the inner primary's native termination result after completing its own cleanup
+
+#### Scenario: Inner payload accepts readiness
+- **WHEN** the nested payload validates its lifecycle READY record
+- **THEN** owner identity, launch ID and transport refer only to the inner layer and no outer lifecycle endpoint is inherited
+
 ### Requirement: Preserve inputs and fail startup safely
 Procward SHALL preserve argument boundaries, cwd, environment and stdio destinations except for the documented managed handoff and necessary terminal isolation. Invalid options, missing commands, invalid inherited endpoints or required ownership setup failure SHALL fail visibly before payload side effects, without silently launching unmanaged.
 

@@ -31,6 +31,12 @@
 - [x] 4.5 Add generic per-task `procward run` control/result/cleanup mode and fixture conformance; verify cancellation, native statuses, required cleanup acknowledgement/transport drain, Darwin best-effort wording and failure when primary exit is mistaken for tree completion.
 - [x] 4.6 Test generic owner-loss notification to the primary and a bounded pre-kill window derived from `--grace`, `--fatal-grace` and `--cleanup-deadline`; verify cooperative and blocked primaries, configured-deadline preemption, not-ready retry, silence timeout, endless-hint bound and honest harness rescue reporting. Fixed hook/watchdog durations belong only to pi policy in 7.4.
 
+## 4a. Require default nesting (addendum-15)
+
+- [x] 4.7 Amend the pi contract/proposal/design/7.2: pi under pi or external procward adds its own layer; only launcher flag/environment opt-out disables it; only pi's private one-shot bootstrap marker plus valid READY skips that bootstrap's wrapping. Validate OpenSpec strictly.
+- [ ] 4.8 Run `procward run -- procward run -- <fixture tree>` on all 12 rows: preserve both layers' payload result and clean descendants on primary exit; clean the whole nested tree within the outer configured deadline on outer-owner loss; clean the inner subtree and report the correct outer result on inner-owner loss; expose only inner contract metadata and no outer fd/HANDLE. Keep macOS best-effort limits and probe-only qemu-user exceptions explicit; fix product defects without weakening assertions.
+- [ ] 4.9 Document default nesting and backend-specific nested ownership in `docs/contract.md` and `docs/platforms.md`.
+
 ## 5. Finish documentation/release setup and get one independent review
 
 - [x] 5.1 Write README with only what procward is, installation, usage and background; verify Background links to `https://github.com/xz-dev/pi` as origin/main consumer and describes a new implementation, not copied code. Put architecture/platform internals, contract/pi integration, development/testing and dependency licence detail in the mapped `docs/` pages.
@@ -52,7 +58,7 @@
 ## 7. Integrate pi afterwards as a normal pi change
 
 - [ ] 7.1 In pi's normal authorized owning patch ref, bundle/pin the released procward binary for source/npm/compiled layouts; verify binary target/version/materialization and clear missing/incompatible-binary failure without importing pi into procward CI.
-- [ ] 7.2 Add lightweight ownership bootstrap before heavy CLI imports and consume the direct-primary contract; verify default wrapping, `procward run -- pi` no-nesting, stale-handoff refusal, version-only startup and zero heavy-graph import in outer versus one in inner runtime across source/package entrypoints; pass pi's chosen grace/fatal/deadline explicitly through procward's generic run timing options.
+- [ ] 7.2 Add lightweight ownership bootstrap before heavy CLI imports and consume the direct-primary contract; verify default wrapping, a new pi layer under pi or any external `procward run -- pi`, only private one-shot bootstrap-marker plus valid-READY suppression, stale-handoff refusal, version-only startup and zero heavy-graph import in outer versus one in inner runtime across source/package entrypoints; pass pi's chosen grace/fatal/deadline explicitly through procward's generic run timing options.
 - [ ] 7.3 Preserve `--no-process-ownership`, inherited `PI_NO_PROCESS_OWNERSHIP=1`, value-taking options/`--`, local per-task wrapping and task completion errors; verify explicit opt-out does not pretend to escape an external scope and remote pi-env/PIEXSPEC behaviour stays untouched.
 - [ ] 7.4 Keep hooks/UI policy in pi and adapt owner-loss notification/watchdog/shutdown re-entry; verify paused wake, notification before hooks, up-to-5-second responsive shutdown, 7-second blocked-loop self-kill, native preemption and no restarted suspended terminal input.
 - [ ] 7.5 Add the canonical procward link to pi's root README process-tree ownership feature on the feature's current owning patch ref; verify reciprocal rendered links, retained macOS caveat and pi's ordinary fork integration checks, without editing downstream main directly or creating a special release-packet workflow.
