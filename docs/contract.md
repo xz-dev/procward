@@ -149,3 +149,24 @@ record buffering is bounded, and the final transport flush has a configured
 cleanup-deadline bound. Darwin C confirms a best-effort sweep, not containment.
 EOF following C is required evidence that the owning helper closed its endpoint.
 EOF on the separate application pipe is owner loss, not this task completion.
+
+## Independent deadline examples
+
+Standalone managed fixtures cover a responsive primary that observes OWNER-LOSS,
+a primary blocked after readiness that cannot observe it, and EOF when the
+immediate native parent disappears. Their Unix policy is explicitly configured
+as 1s ordinary grace, 500ms fatal grace and 1500ms cleanup deadline. The blocked
+primary cannot extend those bounds. Windows kill-on-close may preempt this
+opportunity, as described above.
+
+A separate pipe interaction fixture replies NOT-READY before accepting quit.
+The harness acts once, waits for the response and only then retries. Silence
+and endless NOT-READY responses both fail at the original response deadline;
+terminating the failed interaction's owner and observing transport closure is
+separate teardown, not a successful interaction. Fixture deadlines are testing
+policy, not procward hook/watchdog settings.
+
+Task conformance also faults a native controller after X while an ignoring
+worker remains. Even with a known primary status, controller failure produces E,
+never a successful C. Error diagnostics are best-effort when inherited stderr is
+blocked: exit status and task error/completion records remain authoritative.
