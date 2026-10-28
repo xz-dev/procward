@@ -76,6 +76,11 @@ Unix cleanup SHALL deliver TERM before any teardown CONT to a stopped target, th
 - **THEN** the surviving owner uses only the remaining original budget, retaining selected grace and going directly to KILL if grace already elapsed
 - **AND** the private one-shot policy record is separate from application/lease transports and never inherited by the payload
 
+#### Scenario: Anchor dies after the first teardown CONT
+- **WHEN** a retained identity has received TERM then one CONT and the anchor dies during grace
+- **THEN** fallback retains that identity's progress, does not repeat CONT and completes under the original configured deadline
+- **AND** genuinely untreated identities still receive their first ordered TERM/CONT if adopted during grace
+
 #### Scenario: Anchor dies before policy publication
 - **WHEN** an anchor dies without having started/published cleanup
 - **THEN** the surviving owner selects its first policy from that fault observation rather than inventing a prior start

@@ -99,7 +99,12 @@ Cleanup is generic/configurable: `--grace 6s --fatal-grace 3s
 --cleanup-deadline 7500ms` are defaults, with validation described in
 [platforms.md](platforms.md). A one-shot private CLOEXEC record publishes the
 system-wide monotonic start/selection before cleanup actions so outer fallback
-cannot restart either configured grace or deadline. The non-default late-loss
+cannot restart either configured grace or deadline. The same pipe now retains
+per-identity TERM/CONT reservations across takeover, preventing replay for an
+already-treated identity while allowing first signals for new adopted work.
+Reservations precede syscalls: a crash in between may omit that grace attempt,
+never replay it; original KILL/deadline policy is unchanged. Backpressure defers
+grace signals without blocking KILL. The non-default late-loss
 fixture uses 2s/1s/2500ms; discarding the record made its negative control fail at
 2.821 seconds. Loss before publication is a separate checked case.
 
@@ -123,6 +128,34 @@ negative control failed cleanly on deadline and reported its own rescue.
 A child-only Linux seccomp filter also denies PR_SET_PDEATHSIG to verify required
 wake setup refuses payload execution. Omitting arming made that new negative
 control fail with payload status 0 instead of 125; the syscall was restored.
+
+## Pre-tag review fix-forward
+
+The review at `200cc58` blocked tagging. Three independent fixes have local
+red→green evidence under `/var/tmp/pwf-fixes/` (task-owned `pwf-*` tmux sessions,
+server PPID 1, no installed pi subreaper ancestor):
+
+| Concern | Regression / evidence | Result |
+| --- | --- | --- |
+| SIGTTIN restart loop (`c7e3e68`) | `cargo test --locked --bin procward background_read_after_foreground_reclaim_returns_to_cleanup -- --nocapture`; `ttin-red.log` / `ttin-green.log` | Before fix: denied background read never returned after shell reclaim, test failed at its unchanged 2s reader deadline. After fix: direct read returns to cleanup. |
+| Repeated unchanged blocked terminal fixture (`c7e3e68`) | `PROCWARD_TERMINAL_STRESS=200 cargo test --locked --test terminal repeated_blocked_terminal_cleanup_survives_foreground_reclaim -- --nocapture`; `ttin-green.log` | All 200 passed; ordinary full-suite CI repeats eight times by default, retaining each original assertion/deadline. |
+| Raw terminal on anchor loss (`d07ec8b`) | `cargo test --locked --test terminal anchor_loss_restores_raw_terminal_only_with_foreground_authority -- --nocapture`; `restore-red.log` / `restore-green.log` | Before fix: status 125 but `restored=false`, cooked flags lost. After fix: `restored=true`, status 125, all owned identities gone; unrelated-foreground variant preserves its settings. |
+| Repeated teardown CONT (`11cab0a`) | `cargo test --locked --test cli early_anchor_loss_does_not_repeat_teardown_cont_for_adopted_identity -- --nocapture`; `cont-red.log` / `cont-green.log` | Before fix: `true 2`, expected `true 1`. After fix: count one, status 125, no survivors within original 2500ms deadline. FreeBSD also exercises early loss with its existing order fixture. |
+
+After these fixes, local `cargo test --locked --all-targets -- --nocapture`
+passed 55 applicable Linux tests (zero failures/ignored). Full build, clippy
+`-D warnings`, formatting, strict OpenSpec validation and three release-safety
+regressions passed. This local result does not replace the required twelve-row
+ordinary CI or independent review approval. No tags, releases, repository settings
+or pi code changed. Local commits used command-scoped signing disable after the
+configured GPG pinentry timed out; no persistent Git setting changed.
+
+Follow-up: the Darwin normal-exit absence flake remains unclassified. Tests now
+label each poll phase and print retained/current PID, parent, birth, state and
+UIDs, captured stderr and fixture-readiness facts before failed fixture cleanup.
+No assertion/deadline changed. Harness readiness alone is not proof that product
+inventory retained the identity; classify the next failure rather than treating
+an unchanged-source rerun as a fix.
 
 ## Every-event CI and normal reruns
 

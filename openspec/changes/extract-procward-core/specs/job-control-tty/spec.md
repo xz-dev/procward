@@ -37,6 +37,10 @@ TERM/HUP, owner loss and terminal loss SHALL initiate irreversible cleanup even 
 - **WHEN** private output is blocked and unrelated work acquires the physical foreground
 - **THEN** cleanup remains able to terminate/reap owned work and discard fatal output where needed
 
+#### Scenario: Background read races foreground reclaim
+- **WHEN** the relay observes itself foreground but the shell reclaims before its physical-terminal read
+- **THEN** SIGTTIN interrupts that read and native cleanup keeps progressing within its original bound
+
 ### Requirement: Restore terminal state only with authority
 On pause, normal exit and abnormal cleanup, surviving authorized native roles SHALL attempt saved terminal restoration. Kernel modifying calls SHALL decide authority; mode equality, signal masking or a private-session physical write SHALL NOT bypass a denial. No claim SHALL be made that a killed process can execute its own cleanup after SIGKILL.
 
@@ -47,6 +51,11 @@ On pause, normal exit and abnormal cleanup, surviving authorized native roles SH
 #### Scenario: Shell-facing owner dies
 - **WHEN** an authorized native survivor retains the terminal state needed for restoration
 - **THEN** restoration is attempted without waiting for application hooks or the dead owner
+
+#### Scenario: Anchor dies during raw-mode payload
+- **WHEN** the anchor is killed while the shell-facing owner survives with foreground authority
+- **THEN** the surviving owner cleans the tree, attempts the saved physical-terminal restoration and returns failure 125
+- **AND** after unrelated foreground takeover, the same failover must not overwrite that job's state
 
 ### Requirement: Preserve normal output and interrupt handling
 Normal completion SHALL deliver final output and preserve the primary result. Fatal cleanup SHALL interrupt tail waits and alone SHALL be allowed to discard pending output. Terminal Ctrl-C SHALL reach the command once, not be duplicated by forwarding. Native signal dispositions/masks SHALL NOT leak into payload exec.

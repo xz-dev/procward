@@ -12,7 +12,9 @@ Final documentation/release setup remains pending.
 
 Linux/FreeBSD have a shell-facing owner and a reaper anchor. Noninteractive
 anchors use a separate process group; interactive native roles share the caller's
-job group and catch TTIN/TTOU without masking them. Both can reap; the surviving
+job group and catch TTIN/TTOU without masking them. Both handlers disable
+SA_RESTART: a foreground-reclaim race must return EINTR to cleanup rather than
+restart a denied terminal read/write indefinitely. Both can reap; the surviving
 role cleans after the other dies. The
 anchor's required parent-death SIGCONT wake is armed and its live parent checked
 before launch permission. A close-on-exec pipe carries the one launch grant and
@@ -124,7 +126,15 @@ configured fatal grace. Before cleanup actions, the anchor publishes one bounded
 private record containing CLOCK_MONOTONIC start, configuration and selection.
 A separate CLOEXEC policy pipe never reaches the payload. Outer fallback keeps
 that original start/selection: late role loss, adoption and later status discovery
-cannot restart grace or deadline. Without a published record, the anchor had not
+cannot restart grace or deadline. The same pipe carries atomic per-identity
+TERM/CONT reservations before signalling. The outer retains these even after
+anchor death, so fallback does not replay teardown CONT. PID plus birth binds
+progress to an identity (and Darwin also includes its checked UIDs); new identities
+still receive their first ordered signals during grace. Full progress pipes defer
+new grace signals, never extend the deadline or delay KILL. A crash between a
+reservation and its syscall can omit that grace attempt, not duplicate it; KILL
+and completion checks still use the original budget. Without a published policy
+record, the anchor had not
 started cleanup and outer selects its first policy at fault observation.
 
 TERM precedes one permitted CONT per newly owned direct child during grace;
@@ -132,6 +142,8 @@ escalation uses KILL without fresh CONT. Unknown completion evidence or known
 survivors at the configured deadline fail cleanup. Default runtime fault checks
 remain **8 seconds**; a non-default 2s/1s/2500ms late-anchor-loss fixture enforces
 the original configured deadline and also checks loss before publication.
+An early-loss fixture kills the anchor after `true 1` (TERM seen, one CONT) and
+requires the count to remain one through fallback and final cleanup.
 
 macOS keeps an ESRCH-with-existing-PID identity transition as unknown, not gone:
 it neither signals from that observation nor completes while it remains pending.
@@ -161,6 +173,11 @@ is the standard shell/login arrangement, not another reaper, watchdog or public
 mode. Native ownership/cleanup roles stay in the caller's session, outside the
 frozen workload; the private keeper is inside that workload and pauses with it.
 Noninteractive and per-task execution creates no PTY/session keeper.
+The outer captures physical termios before launching the anchor. On abnormal
+anchor exit it attempts saved restoration after cleanup, including cleanup
+failure, using the same unmasked kernel-authority check as the relay. An active
+raw-payload fault fixture requires status 125 and restored cooked settings; its
+unrelated-foreground variant requires the other job's settings to remain intact.
 
 FreeBSD requires this retained session lifetime. Its
 [exit1 path](https://github.com/freebsd/freebsd-src/blob/releng/14.3/sys/kern/kern_exit.c)
