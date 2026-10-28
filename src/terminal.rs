@@ -214,6 +214,37 @@ impl Terminal {
         }
         Ok(())
     }
+    pub fn wait(&self, lease: &OwnedFd, active: bool) -> io::Result<()> {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        let mut fds = vec![
+            PollFd::new(lease, PollFlags::IN),
+            PollFd::new(self.control.as_ref().unwrap(), PollFlags::IN),
+        ];
+        if active && self.foreground()? {
+            if self.output.len() < 65536 {
+                fds.push(PollFd::new(&self.master, PollFlags::IN));
+            }
+            if !self.output.is_empty() {
+                fds.push(PollFd::new(&self.physical, PollFlags::OUT));
+            }
+            if self.result_bytes.is_empty() {
+                fds.push(PollFd::new(&self.physical, PollFlags::IN));
+                if !self.input.is_empty() {
+                    fds.push(PollFd::new(&self.master, PollFlags::OUT));
+                }
+            }
+        }
+        match poll(
+            &mut fds,
+            Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 5_000_000,
+            }),
+        ) {
+            Ok(_) | Err(Errno::INTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
     pub fn pause_requested(&mut self) -> bool {
         std::mem::take(&mut self.pause)
     }
@@ -541,6 +572,23 @@ fn run_keeper(
         if started.is_some_and(|start| start.elapsed() >= deadline) {
             return Err(io::Error::other("terminal drain deadline expired"));
         }
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        if relay_alive {
+            let mut readiness = [rustix::event::PollFd::new(
+                &control,
+                rustix::event::PollFlags::IN,
+            )];
+            match rustix::event::poll(
+                &mut readiness,
+                Some(&rustix::event::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 2_000_000,
+                }),
+            ) {
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 }

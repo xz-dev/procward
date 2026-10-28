@@ -166,6 +166,7 @@ pub fn run_owned(
                 return Ok(());
             }
             if let Some(terminal) = &mut terminal {
+                let was_paused = paused;
                 let stop =
                     terminal.pause_requested() || events.contains(&signal_hook::consts::SIGTSTP);
                 let resume = events.contains(&signal_hook::consts::SIGCONT);
@@ -175,7 +176,7 @@ pub fn run_owned(
                     waiting_resume = true;
                     rustix::io::write(notice, b"R")?;
                 }
-                if stop && !resume && !paused {
+                if stop && !was_paused {
                     inventory.freeze(true)?;
                     terminal.restore()?;
                     paused = true;
@@ -191,7 +192,11 @@ pub fn run_owned(
                     process::kill_process_group(process::getpgrp(), process::Signal::CONT)?;
                 }
             }
-            thread::sleep(Duration::from_millis(5));
+            if let Some(terminal) = &terminal {
+                terminal.wait(lease, !paused)?;
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
         }
     })();
     let policy = Policy::new(config, false);
@@ -228,6 +233,7 @@ pub fn run_owned(
                         if inventory.empty_except(primary)? {
                             terminal.release_if_drained()?;
                         }
+                        terminal.wait(lease, true)?;
                         return Ok(Some(primary));
                     }
                 }
@@ -252,7 +258,9 @@ pub fn run_owned(
                     break;
                 }
                 terminal.drain()?;
-                thread::sleep(Duration::from_millis(2));
+                if !terminal.drained() {
+                    terminal.wait(lease, true)?;
+                }
             }
         }
         terminal.restore()?;
@@ -338,6 +346,10 @@ pub(crate) fn cleanup(
             Err(error) => return Err(error.into()),
             Ok(None) => {}
         }
-        thread::sleep(Duration::from_millis(5));
+        if protected.is_some() {
+            thread::yield_now();
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 }

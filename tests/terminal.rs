@@ -11,7 +11,6 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -39,9 +38,6 @@ impl Terminal {
             state.local_modes |= rustix::termios::LocalModes::TOSTOP;
             rustix::termios::tcsetattr(&pty.user, rustix::termios::OptionalActions::Now, &state)
                 .unwrap();
-        }
-        if label == "paused-loss" {
-            stdfs::write(dir.join("keep"), b"hold shell alive").unwrap();
         }
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK).unwrap();
         let raw = pty.user.as_raw_fd();
@@ -107,7 +103,20 @@ impl Terminal {
                     &self.output.as_bytes()[self.output.len().saturating_sub(4096)..]
                 )
             );
-            thread::sleep(Duration::from_millis(2));
+            let mut readiness = [rustix::event::PollFd::new(
+                &self.master,
+                rustix::event::PollFlags::IN,
+            )];
+            match rustix::event::poll(
+                &mut readiness,
+                Some(&rustix::event::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 2_000_000,
+                }),
+            ) {
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(error) => panic!("terminal readiness query failed: {error}"),
+            }
         }
     }
     fn input(&mut self, bytes: &[u8]) {
@@ -122,6 +131,10 @@ impl Terminal {
             t.dir.join(format!("acted-{n}")).exists()
         });
         self.sequence += 1;
+    }
+    fn finish_host(&mut self) -> std::process::ExitStatus {
+        stdfs::write(self.dir.join("finish"), b"observations complete").unwrap();
+        self.host.wait().unwrap()
     }
     fn file(&self, name: &str) -> String {
         stdfs::read_to_string(self.dir.join(name)).unwrap()
@@ -185,9 +198,9 @@ fn interactive_primary_has_private_foreground_terminal_and_preserves_tail_and_st
         "true",
         "saved={} actual={}",
         terminal.file("saved-state"),
-        terminal.file("takeover-final")
+        terminal.file("returned-state")
     );
-    assert!(terminal.host.wait().unwrap().success());
+    assert!(terminal.finish_host().success());
 }
 
 #[test]
@@ -201,14 +214,14 @@ fn shell_reclaim_does_not_block_fatal_cleanup_or_kill_shell() {
     let fault = Instant::now();
     terminal.action("term");
     terminal.until("cleanup after shell reclaim", |t| {
-        t.dir.join("takeover-final").exists()
+        t.dir.join("restored").exists()
     });
     assert!(
         fault.elapsed() < Duration::from_secs(2),
         "configured deadline must bound reclaimed-terminal cleanup"
     );
     assert!(
-        terminal.host.wait().unwrap().success(),
+        terminal.finish_host().success(),
         "unrelated shell must survive"
     );
 }
@@ -291,7 +304,7 @@ fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont
         t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
     });
     assert_eq!(terminal.file("result"), "23");
-    assert!(terminal.host.wait().unwrap().success());
+    assert!(terminal.finish_host().success());
 }
 
 #[test]
@@ -308,7 +321,7 @@ fn interactive_stderr_keeps_its_redirected_destination() {
     assert_eq!(terminal.file("result"), "23");
     assert_eq!(terminal.file("stderr"), "REDIRECTED-TAIL\n");
     assert!(!terminal.output.contains("REDIRECTED-TAIL"));
-    assert!(terminal.host.wait().unwrap().success());
+    assert!(terminal.finish_host().success());
 }
 
 #[test]
@@ -325,7 +338,7 @@ fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
     });
     terminal.input(b"q");
     terminal.until("complete final tail and result", |t| {
-        t.output.contains("FINAL-TAIL") && t.dir.join("result").exists()
+        t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
     });
     assert_eq!(
         terminal.output.bytes().filter(|b| *b == b'x').count(),
@@ -337,9 +350,9 @@ fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
         "true",
         "saved={} actual={}",
         terminal.file("saved-state"),
-        terminal.file("takeover-final")
+        terminal.file("returned-state")
     );
-    assert!(terminal.host.wait().unwrap().success());
+    assert!(terminal.finish_host().success());
 }
 
 #[test]
@@ -363,18 +376,18 @@ fn fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authori
     let fault = Instant::now();
     terminal.action("term");
     terminal.until("fatal cleanup despite blocked physical output", |t| {
-        t.dir.join("takeover-final").exists()
+        t.dir.join("restored").exists()
     });
     assert!(
         fault.elapsed() < Duration::from_secs(2),
         "configured teardown deadline"
     );
+    assert!(terminal.finish_host().success());
     assert_eq!(
         terminal.file("takeover-final"),
         terminal.file("takeover"),
         "denied restoration must not overwrite unrelated foreground state"
     );
-    assert!(terminal.host.wait().unwrap().success());
 }
 
 fn absent(pid: &str) -> bool {
@@ -419,6 +432,6 @@ fn owner_loss_while_paused_cleans_work_without_foreground_rescue() {
         "configured teardown deadline"
     );
     stdfs::write(terminal.dir.join("finish"), b"complete").unwrap();
-    assert!(terminal.host.wait().unwrap().success());
+    assert!(terminal.finish_host().success());
     assert_eq!(terminal.file("takeover-final"), terminal.file("takeover"));
 }

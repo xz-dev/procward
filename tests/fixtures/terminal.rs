@@ -74,6 +74,15 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
         assert!(Instant::now() < startup, "native controller did not start");
         thread::sleep(Duration::from_millis(2));
     }
+    while rp::getpgid(Some(pid)).unwrap() != pid
+        || rp::getsid(Some(pid)).unwrap() != rp::getsid(None).unwrap()
+    {
+        assert!(
+            Instant::now() < startup,
+            "shell job group was not ready for foreground handoff"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
     termios::tcsetpgrp(tty, pid).unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut sequence = 0;
@@ -111,16 +120,19 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                 )
                 .unwrap();
                 publish(
+                    dir.join("returned-state"),
+                    format!("{:?}", observe_settings(tty)),
+                )
+                .unwrap();
+                while !dir.join("finish").exists() {
+                    assert!(Instant::now() < deadline, "shell hold deadline");
+                    thread::sleep(Duration::from_millis(2));
+                }
+                publish(
                     dir.join("takeover-final"),
                     format!("{:?}", observe_settings(tty)),
                 )
                 .unwrap();
-                if dir.join("keep").exists() {
-                    while !dir.join("finish").exists() {
-                        assert!(Instant::now() < deadline, "shell hold deadline");
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                }
                 return;
             }
         }
