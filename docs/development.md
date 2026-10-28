@@ -1,9 +1,11 @@
 # Development
 
-This checkout implements the noninteractive lifecycle/platform slice of change
-`extract-procward-core`. It is not a complete v0.1.0 release: Unix terminal job
-control, application handoff/task control, final documentation and release setup
-remain later tasks. No tests launch pi or use pi-env source/fixtures.
+This checkout implements standalone lifecycle/platform ownership, Unix terminal
+job control and generic application/task contracts for change
+`extract-procward-core`. Release setup is described in [ci-release.md](ci-release.md);
+the independent pre-tag review, owner-controlled immutable-release prerequisite,
+first release and later pi integration remain separate tasks. No tests launch pi
+or use pi-env source/fixtures.
 
 ## Build and checks
 

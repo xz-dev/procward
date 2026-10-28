@@ -33,12 +33,12 @@
 
 ## 5. Finish documentation/release setup and get one independent review
 
-- [ ] 5.1 Write README with only what procward is, installation, usage and background; verify Background links to `https://github.com/xz-dev/pi` as origin/main consumer and describes a new implementation, not copied code. Put architecture/platform internals, contract/pi integration, development/testing and dependency licence detail in the mapped `docs/` pages.
+- [x] 5.1 Write README with only what procward is, installation, usage and background; verify Background links to `https://github.com/xz-dev/pi` as origin/main consumer and describes a new implementation, not copied code. Put architecture/platform internals, contract/pi integration, development/testing and dependency licence detail in the mapped `docs/` pages.
 - [ ] 5.2 Complete the full applicable runtime matrix and fix forward until every v0.1.0 platform passes; verify real GNU/musl/guest/ConPTY results across all 12 rows, including explicitly labelled qemu-user riscv64 execution with a documented emulated-only timing scale only if needed, no build-only substitutes, unchanged native fault deadlines and ordinary attempt logs rather than a sealed acceptance system. Early pushes/reruns remain allowed throughout.
 - Follow-up for complete riscv64 kernel/seccomp/exec-error coverage: add a full-system `qemu-system` VM CI job. qemu-user's explicitly reported unsupported cases are not coverage for those assertions.
 
 - [ ] 5.3 Implement the version-tag-only release workflow before review: exact `vX.Y.Z`/Cargo agreement, all-12-target rebuild/full fixture rerun (including riscv64 GNU and musl), frozen download assets for both riscv64 variants as well as existing targets, `SHA256SUMS` and GitHub actions/attest provenance; verify tag/permission/failed-target/tampered-byte checks, read-only PR CI, signing-only OIDC permissions and publisher-only contents write.
-- [ ] 5.4 Write `docs/ci-release.md` with draft-first publication, consumer attestation/checksum commands, manual immutable-setting prerequisites and post-publication drift risk; verify current GitHub documentation/permissions are cited and no release/verification/developer sections leaked into README.
+- [x] 5.4 Write `docs/ci-release.md` with draft-first publication, consumer attestation/checksum commands, manual immutable-setting prerequisites and post-publication drift risk; verify current GitHub documentation/permissions are cited and no release/verification/developer sections leaked into README.
 - [ ] 5.5 Obtain **one independent implementation review before the first tag**, covering crate/frontend assumptions, safety/terminal gaps, fresh tests and release setup; address blockers and verify the complete matrix passes afterwards. Do not make independent review a per-step or early-push prerequisite.
 
 ## 6. Release v0.1.0 through the version tag
