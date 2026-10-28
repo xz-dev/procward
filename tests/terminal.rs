@@ -338,7 +338,7 @@ fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
     });
     terminal.input(b"q");
     terminal.until("complete final tail and result", |t| {
-        t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
+        t.dir.join("returned-state").exists() && t.output.contains("FINAL-TAIL")
     });
     assert_eq!(
         terminal.output.bytes().filter(|b| *b == b'x').count(),
