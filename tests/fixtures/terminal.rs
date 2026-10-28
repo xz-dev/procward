@@ -202,7 +202,14 @@ pub fn child(dir: &Path) {
                         std::io::stdout().write_all(&vec![b'x'; 262144]).unwrap();
                     }
                     println!("FINAL-TAIL");
+                    std::io::stdout().flush().unwrap();
                     eprintln!("REDIRECTED-TAIL");
+                    std::io::stderr().flush().unwrap();
+                    publish(
+                        dir.join("tail-written"),
+                        b"both streams flushed before primary exit",
+                    )
+                    .unwrap();
                     std::process::exit(23);
                 }
                 b'f' => {

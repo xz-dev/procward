@@ -95,8 +95,14 @@ impl Terminal {
             }
             assert!(
                 Instant::now() < deadline,
-                "{description}: deadline; transcript={:?}",
-                self.output
+                "{description}: deadline; result={:?}; tail_written={}; physical_queue={:?}; bytes={}; transcript_tail={:?}",
+                stdfs::read_to_string(self.dir.join("result")),
+                self.dir.join("tail-written").exists(),
+                rio::ioctl_fionread(&self.master),
+                self.output.len(),
+                String::from_utf8_lossy(
+                    &self.output.as_bytes()[self.output.len().saturating_sub(4096)..]
+                )
             );
             thread::sleep(Duration::from_millis(2));
         }
