@@ -24,9 +24,33 @@ pub fn interactive() -> io::Result<bool> {
     Ok(a.st_rdev == b.st_rdev && termios::tcgetsid(input)? == process::getsid(None)?)
 }
 
-pub struct Terminal {
+pub struct SavedTerminal {
     physical: OwnedFd,
     saved: Termios,
+}
+impl SavedTerminal {
+    pub fn open() -> io::Result<Self> {
+        let physical = fs::open(
+            "/dev/tty",
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        let saved = termios::tcgetattr(&physical)?;
+        Ok(Self { physical, saved })
+    }
+    pub fn restore(&self) -> io::Result<()> {
+        // Kernel decides authority. No equality shortcut or TTIN/TTOU masking.
+        if let Err(error) = termios::tcsetattr(&self.physical, OptionalActions::Now, &self.saved) {
+            if termios::tcgetpgrp(&self.physical)? == process::getpgrp() {
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct Terminal {
+    state: SavedTerminal,
     master: OwnedFd,
     user: Option<OwnedFd>,
     input: Vec<u8>,
@@ -44,18 +68,12 @@ impl Terminal {
         if !interactive()? {
             return Ok(None);
         }
-        let physical = fs::open(
-            "/dev/tty",
-            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )?;
-        let saved = termios::tcgetattr(&physical)?;
-        let size = termios::tcgetwinsize(&physical)?;
-        let pty = rustix_openpty::openpty(Some(&saved), Some(&size))?;
+        let state = SavedTerminal::open()?;
+        let size = termios::tcgetwinsize(&state.physical)?;
+        let pty = rustix_openpty::openpty(Some(&state.saved), Some(&size))?;
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK)?;
         Ok(Some(Self {
-            physical,
-            saved,
+            state,
             master: pty.controller,
             user: Some(pty.user),
             input: Vec::new(),
@@ -154,19 +172,19 @@ impl Terminal {
         self.user.take();
     }
     pub fn foreground(&self) -> io::Result<bool> {
-        Ok(termios::tcgetpgrp(&self.physical)? == process::getpgrp())
+        Ok(termios::tcgetpgrp(&self.state.physical)? == process::getpgrp())
     }
     pub fn pump(&mut self) -> io::Result<()> {
         if !self.foreground()? {
             return Ok(());
         }
         if !self.raw {
-            let mut raw = self.saved.clone();
+            let mut raw = self.state.saved.clone();
             raw.make_raw();
-            termios::tcsetattr(&self.physical, OptionalActions::Now, &raw)?;
+            termios::tcsetattr(&self.state.physical, OptionalActions::Now, &raw)?;
             self.raw = true;
         }
-        let size = termios::tcgetwinsize(&self.physical)?;
+        let size = termios::tcgetwinsize(&self.state.physical)?;
         if (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
             != (
                 self.size.ws_row,
@@ -178,8 +196,8 @@ impl Terminal {
             termios::tcsetwinsize(&self.master, size)?;
             self.size = size;
         }
-        read_buffer(&self.physical, &mut self.input, false)?;
-        let suspend = self.saved.special_codes[termios::SpecialCodeIndex::VSUSP];
+        read_buffer(&self.state.physical, &mut self.input, false)?;
+        let suspend = self.state.saved.special_codes[termios::SpecialCodeIndex::VSUSP];
         if suspend != 0 && self.input.contains(&suspend) {
             self.input.retain(|byte| *byte != suspend);
             self.pause = true;
@@ -195,7 +213,7 @@ impl Terminal {
             for _ in 0..16 {
                 let (eof, read) = read_buffer(&self.master, &mut self.output, true)?;
                 self.eof |= eof;
-                let written = write_buffer(&self.physical, &mut self.output)?;
+                let written = write_buffer(&self.state.physical, &mut self.output)?;
                 emitted += written;
                 if (read == 0 && written == 0) || emitted >= 65536 {
                     break;
@@ -215,10 +233,10 @@ impl Terminal {
                 fds.push(PollFd::new(&self.master, PollFlags::IN));
             }
             if !self.output.is_empty() {
-                fds.push(PollFd::new(&self.physical, PollFlags::OUT));
+                fds.push(PollFd::new(&self.state.physical, PollFlags::OUT));
             }
             if self.result_bytes.is_empty() {
-                fds.push(PollFd::new(&self.physical, PollFlags::IN));
+                fds.push(PollFd::new(&self.state.physical, PollFlags::IN));
                 if !self.input.is_empty() {
                     fds.push(PollFd::new(&self.master, PollFlags::OUT));
                 }
@@ -243,14 +261,8 @@ impl Terminal {
     }
     pub fn restore(&mut self) -> io::Result<()> {
         if self.raw {
-            // Kernel decides authority. No equality shortcut or TTIN/TTOU masking.
-            let result = termios::tcsetattr(&self.physical, OptionalActions::Now, &self.saved);
             self.raw = false;
-            if let Err(error) = result {
-                if self.foreground()? {
-                    return Err(error.into());
-                }
-            }
+            self.state.restore()?;
         }
         Ok(())
     }
@@ -583,7 +595,7 @@ fn run_keeper(
     }
 }
 
-fn interrupt_job_control() -> io::Result<()> {
+pub(crate) fn interrupt_job_control() -> io::Result<()> {
     // signal-hook uses SA_RESTART; tty authority denial must return to ownership checks.
     unsafe {
         for signal in [libc::SIGTTIN, libc::SIGTTOU] {

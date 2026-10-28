@@ -447,3 +447,50 @@ fn repeated_blocked_terminal_cleanup_survives_foreground_reclaim() {
         fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authority();
     }
 }
+
+#[test]
+fn anchor_loss_restores_raw_terminal_only_with_foreground_authority() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for takeover in [false, true] {
+        let mut terminal = Terminal::new("anchor-loss");
+        terminal.until("raw payload ready", |t| {
+            t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+        });
+        if takeover {
+            terminal.action("takeover");
+        }
+        let fault = Instant::now();
+        terminal.action("kill-anchor");
+        terminal.until("surviving owner restores after anchor loss", |t| {
+            t.dir.join("returned-state").exists()
+        });
+        assert_eq!(terminal.file("result"), "125");
+        assert!(
+            fault.elapsed() < Duration::from_secs(2),
+            "configured teardown deadline"
+        );
+        terminal.until("owned identities gone", |t| {
+            ["primary", "worker", "keeper", "anchor"]
+                .iter()
+                .all(|name| absent(&t.file(name)))
+        });
+        assert!(terminal.finish_host().success());
+        if takeover {
+            assert_eq!(
+                terminal.file("takeover-final"),
+                terminal.file("takeover"),
+                "failover restoration must not overwrite unrelated foreground state"
+            );
+        } else {
+            assert_eq!(
+                terminal.file("restored"),
+                "true",
+                "saved={} actual={}",
+                terminal.file("saved-state"),
+                terminal.file("returned-state")
+            );
+        }
+    }
+}

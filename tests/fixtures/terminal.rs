@@ -160,6 +160,13 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                     rp::kill_process(Pid::from_raw(worker).unwrap(), Signal::CONT).unwrap();
                 }
                 "term" => rp::kill_process(pid, Signal::TERM).unwrap(),
+                "kill-anchor" => {
+                    let anchor = fs::read_to_string(dir.join("anchor"))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    rp::kill_process(Pid::from_raw(anchor).unwrap(), Signal::KILL).unwrap();
+                }
                 "kill" => rp::kill_process(pid, Signal::KILL).unwrap(),
                 _ => panic!("unknown terminal action"),
             }

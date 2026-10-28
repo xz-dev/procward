@@ -140,6 +140,13 @@ pub fn run(
         signal_hook::consts::SIGTTIN,
         signal_hook::consts::SIGTTOU,
     ])?;
+    // Capture before the anchor can switch the physical terminal to raw mode.
+    let saved_terminal = if interactive {
+        crate::terminal::interrupt_job_control()?;
+        Some(crate::terminal::SavedTerminal::open()?)
+    } else {
+        None
+    };
     let (read, write) = pipe()?;
     let (notice, publish) = pipe()?;
     let expected = process::getpid();
@@ -217,7 +224,13 @@ pub fn run(
                 .unwrap_or_else(|| Policy::new(config, status.signal().is_some()));
             #[cfg(not(target_os = "macos"))]
             let mut observed = Inventory::new();
-            return finish_anchor(status, &mut observed, policy);
+            let result = finish_anchor(status, &mut observed, policy);
+            if status.signal().is_some() {
+                if let Some(saved) = &saved_terminal {
+                    saved.restore()?;
+                }
+            }
+            return result;
         }
         for signal in signals.pending().filter(|signal| {
             !matches!(
