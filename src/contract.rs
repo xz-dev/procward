@@ -160,6 +160,49 @@ pub fn owner_identity() -> io::Result<String> {
     ))
 }
 
+// A nested procward replaces the application handoff; it never accepts it as an ownership opt-out.
+pub fn discard_inherited() -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(value) = std::env::var_os("PROCWARD_LIFECYCLE_FD") {
+        drop(crate::owner::inherited_fd(
+            &value,
+            rustix::fs::OFlags::RDONLY,
+        )?);
+    }
+    #[cfg(windows)]
+    if let Some(value) = std::env::var_os("PROCWARD_LIFECYCLE_HANDLE") {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
+            System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            },
+        };
+        let raw = value
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|raw| *raw != 0)
+            .ok_or_else(|| io::Error::other("invalid inherited lifecycle HANDLE"))?;
+        let handle = raw as windows_sys::Win32::Foundation::HANDLE;
+        unsafe {
+            if handle == INVALID_HANDLE_VALUE
+                || [
+                    GetStdHandle(STD_INPUT_HANDLE),
+                    GetStdHandle(STD_OUTPUT_HANDLE),
+                    GetStdHandle(STD_ERROR_HANDLE),
+                ]
+                .contains(&handle)
+                || GetFileType(handle) != FILE_TYPE_PIPE
+            {
+                return Err(io::Error::other("invalid inherited lifecycle pipe HANDLE"));
+            }
+            drop(OwnedHandle::from_raw_handle(handle));
+        }
+    }
+    Ok(())
+}
+
 pub fn clear(command: &mut std::process::Command) {
     for name in ENV {
         command.env_remove(OsStr::new(name));

@@ -37,6 +37,13 @@ fn main() {
             }
             process::exit(23);
         }
+        "nested-probe" | "nested-tree" => {
+            if let Err(error) = managed::nested(Path::new(&args[2]), args[1] == "nested-probe") {
+                eprintln!("REJECTED: {error}");
+                process::exit(125);
+            }
+            process::exit(23);
+        }
         "managed-probe" => {
             if let Err(error) = managed::probe(Path::new(&args[2])) {
                 eprintln!("REJECTED: {error}");
@@ -337,6 +344,31 @@ fn main() {
                     wait_for(&dir.join("worker.pid"));
                     wait_for_input();
                     process::exit(23);
+                }
+                "nested-branch" => {
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    rustix::process::setsid().unwrap();
+                    #[cfg(target_os = "freebsd")]
+                    rustix::process::set_reaper_status(true).unwrap();
+                    spawn("nested-worker", dir).wait().unwrap();
+                }
+                "nested-worker" => {
+                    #[cfg(unix)]
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                    fs::write(dir.join("nested-worker-ready"), b"ready").unwrap();
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    rustix::process::kill_process(
+                        rustix::process::getpid(),
+                        rustix::process::Signal::STOP,
+                    )
+                    .unwrap();
+                    loop {
+                        thread::park();
+                    }
                 }
                 "branch" => {
                     spawn("worker", dir).wait().unwrap();

@@ -181,6 +181,57 @@ fn managed_handoff_is_direct_bounded_one_shot_and_separate_from_native_ownership
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn nested_startup_rejects_invalid_inherited_transport_before_payload() {
+    let marker =
+        std::env::temp_dir().join(format!("procward-nested-invalid-{}", std::process::id()));
+    let regular = fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    #[cfg(unix)]
+    let (variable, raw) = {
+        use std::os::fd::AsRawFd;
+        rustix::io::fcntl_setfd(&regular, rustix::io::FdFlags::empty()).unwrap();
+        ("PROCWARD_LIFECYCLE_FD", regular.as_raw_fd().to_string())
+    };
+    #[cfg(windows)]
+    let (variable, raw) = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+        assert_ne!(
+            unsafe {
+                SetHandleInformation(
+                    regular.as_raw_handle(),
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT,
+                )
+            },
+            0
+        );
+        (
+            "PROCWARD_LIFECYCLE_HANDLE",
+            (regular.as_raw_handle() as usize).to_string(),
+        )
+    };
+    for value in ["0", "invalid", &raw] {
+        let output = finish(
+            Command::new(env!("CARGO_BIN_EXE_procward"))
+                .args(["run", "--"])
+                .arg(fixture())
+                .arg("touch")
+                .arg(&marker)
+                .env(variable, value)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        assert_eq!(output.status.code(), Some(125), "{value}: {output:?}");
+        assert!(
+            !marker.exists(),
+            "invalid incoming transport launched payload"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn owner_loss_notifies_cooperative_primary_and_bounds_blocked_primary_by_configured_policy() {
