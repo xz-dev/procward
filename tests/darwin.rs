@@ -133,7 +133,7 @@ impl Run {
                         info.pbi_ppid,
                         info.pbi_start_tvsec,
                         info.pbi_start_tvusec,
-                        info.pbi_stat,
+                        info.pbi_status,
                         info.pbi_uid,
                         info.pbi_ruid,
                         info.pbi_svuid,
@@ -146,7 +146,7 @@ impl Run {
                 expected.pbi_ppid,
                 expected.pbi_start_tvsec,
                 expected.pbi_start_tvusec,
-                expected.pbi_stat,
+                expected.pbi_status,
                 expected.pbi_uid,
                 expected.pbi_ruid,
                 expected.pbi_svuid
