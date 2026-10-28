@@ -20,6 +20,11 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
     let tty = unsafe { BorrowedFd::borrow_raw(0) };
     let saved = observe_settings(tty);
+    publish(
+        dir.join("shell-session"),
+        rp::getsid(None).unwrap().to_string(),
+    )
+    .unwrap();
     publish(dir.join("saved-state"), format!("{saved:?}")).unwrap();
     let mut child = Command::new(binary);
     child
@@ -58,6 +63,16 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     // TTOU denial must not be hidden in production; shell fixture uses its normal shell policy.
     unsafe {
         libc::signal(signal_hook::consts::SIGTTOU, libc::SIG_IGN);
+    }
+    let startup = Instant::now() + Duration::from_secs(20);
+    loop {
+        let children = owner_children(pid);
+        if let [anchor] = children.as_slice() {
+            publish(dir.join("anchor"), anchor.to_string()).unwrap();
+            break;
+        }
+        assert!(Instant::now() < startup, "native controller did not start");
+        thread::sleep(Duration::from_millis(2));
     }
     termios::tcsetpgrp(tty, pid).unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
@@ -145,6 +160,10 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
 }
 
 pub fn child(dir: &Path) {
+    assert_eq!(
+        crate::managed::terminal_handoff().unwrap(),
+        rp::getppid().unwrap().as_raw_nonzero().get() as u32
+    );
     let stdin = unsafe { BorrowedFd::borrow_raw(0) };
     let group = rp::getpgrp();
     let tty = rustix::fs::open(
@@ -155,7 +174,7 @@ pub fn child(dir: &Path) {
     .unwrap();
     let terminal = termios::tcgetpgrp(&tty).unwrap();
     publish(dir.join("primary"), std::process::id().to_string()).unwrap();
-    publish(dir.join("anchor"), rp::getppid().unwrap().to_string()).unwrap();
+    publish(dir.join("keeper"), rp::getppid().unwrap().to_string()).unwrap();
     publish(
         dir.join("terminal"),
         format!(
@@ -240,6 +259,10 @@ pub fn child(dir: &Path) {
 }
 
 pub fn worker(dir: &Path) {
+    assert!(
+        std::env::var_os("PROCWARD_PROTOCOL").is_none(),
+        "terminal tool inherited managed claim"
+    );
     rp::setsid().unwrap();
     publish(dir.join("worker"), std::process::id().to_string()).unwrap();
     let mut sequence = 0;
@@ -263,4 +286,38 @@ fn observe_settings(tty: BorrowedFd<'_>) -> termios::Termios {
     // BSD settles its transient PENDIN on a readiness query, without consuming or flushing input.
     rio::ioctl_fionread(tty).unwrap();
     termios::tcgetattr(tty).unwrap()
+}
+
+fn owner_children(owner: Pid) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    return fs::read_to_string(format!("/proc/{owner}/task/{owner}/children"))
+        .unwrap()
+        .split_whitespace()
+        .map(|v| v.parse().unwrap())
+        .collect();
+    #[cfg(target_os = "freebsd")]
+    {
+        let selector = Some((rp::IdType::Pid, owner));
+        if !rp::get_reaper_status(selector)
+            .unwrap()
+            .flags
+            .contains(rp::ReaperStatusFlags::OWNED)
+        {
+            return Vec::new();
+        }
+        return rp::get_reaper_pids(Some((rp::IdType::Pid, owner)))
+            .unwrap()
+            .into_iter()
+            .filter(|info| info.flags.contains(rp::PidInfoFlags::CHILD))
+            .map(|info| info.pid.as_raw_nonzero().get() as u32)
+            .collect();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        errno::set_errno(errno::Errno(0));
+        libproc::processes::pids_by_type(libproc::processes::ProcFilter::ByParentProcess {
+            ppid: owner.as_raw_nonzero().get() as u32,
+        })
+        .unwrap()
+    }
 }

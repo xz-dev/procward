@@ -53,6 +53,10 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),
         #[cfg(unix)]
+        [role, rest @ ..] if role == "__terminal_exec" => terminal::exec_ready(rest)
+            .map(u32::from)
+            .map_err(|error| (125, error.to_string())),
+        #[cfg(unix)]
         [role, rest @ ..] if role == "__terminal" => terminal::exec(rest)
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),

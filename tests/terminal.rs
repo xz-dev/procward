@@ -154,12 +154,19 @@ fn interactive_primary_has_private_foreground_terminal_and_preserves_tail_and_st
         .map(|v| v.parse().unwrap())
         .collect();
     let primary: i32 = terminal.file("primary").parse().unwrap();
-    assert_eq!(facts[0], primary, "primary must lead private session");
+    assert_eq!(facts[0], primary, "primary must lead its foreground group");
     assert_eq!(
         facts[1], primary,
         "primary must own private foreground, not shell foreground"
     );
-    assert_eq!(facts[2], primary, "primary must own private session");
+    let keeper: i32 = terminal.file("keeper").parse().unwrap();
+    assert_eq!(facts[2], keeper, "live native keeper owns private session");
+    assert_ne!(
+        facts[2].to_string(),
+        terminal.file("shell-session"),
+        "private session must differ from physical shell"
+    );
+    process::test_kill_process(Pid::from_raw(keeper).unwrap()).unwrap();
     terminal.until("ready output", |t| t.output.contains("TTY-READY"));
     terminal.input(b"q");
     terminal.until("task result and final output", |t| {
@@ -242,7 +249,7 @@ fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont
             terminal.file("paused-state")
         );
         terminal.until("primary and detached worker stopped", |t| {
-            stopped(&t.file("primary")) && stopped(&t.file("worker"))
+            stopped(&t.file("primary")) && stopped(&t.file("worker")) && stopped(&t.file("keeper"))
         });
         terminal.action("race");
         terminal.until("freeze wins detached CONT race without extra Ctrl-Z", |t| {
@@ -379,7 +386,7 @@ fn owner_loss_while_paused_cleans_work_without_foreground_rescue() {
     let fault = Instant::now();
     terminal.action("kill");
     terminal.until("tree and independent cleanup role gone", |t| {
-        ["primary", "worker", "anchor"]
+        ["primary", "worker", "keeper", "anchor"]
             .iter()
             .all(|name| absent(&t.file(name)))
     });

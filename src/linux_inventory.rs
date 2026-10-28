@@ -31,8 +31,15 @@ impl Inventory {
         Ok(())
     }
 
-    pub fn advance(&mut self, phase: crate::policy::Phase) -> io::Result<()> {
+    pub fn advance(
+        &mut self,
+        phase: crate::policy::Phase,
+        protected: Option<Pid>,
+    ) -> io::Result<()> {
         for (pid, target) in &mut self.0 {
+            if Some(*pid) == protected {
+                continue;
+            }
             for signal in crate::policy::next_signals(phase, &mut target.term_sent) {
                 let result = match &target.fd {
                     Some(fd) => process::pidfd_send_signal(fd, *signal),
@@ -45,6 +52,10 @@ impl Inventory {
             }
         }
         Ok(())
+    }
+
+    pub fn empty_except(&self, pid: Pid) -> io::Result<bool> {
+        Ok(self.0.keys().all(|target| *target == pid))
     }
 
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {

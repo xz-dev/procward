@@ -21,8 +21,8 @@ impl Inventory {
         Ok(())
     }
 
-    pub fn advance(&mut self, phase: Phase) -> io::Result<()> {
-        if phase == Phase::Kill {
+    pub fn advance(&mut self, phase: Phase, protected: Option<Pid>) -> io::Result<()> {
+        if phase == Phase::Kill && protected.is_none() {
             // Kernel targets the entire owned subtree, including nested reapers.
             let result = match process::reaper_kill(None, Signal::KILL, false, None) {
                 Ok(result) => result,
@@ -47,6 +47,9 @@ impl Inventory {
             return Ok(());
         }
         for (pid, sent) in &mut self.0 {
+            if Some(*pid) == protected {
+                continue;
+            }
             // These direct children remain unreaped until after this call.
             for signal in next_signals(phase, sent) {
                 match process::kill_process(*pid, *signal) {
@@ -56,6 +59,12 @@ impl Inventory {
             }
         }
         Ok(())
+    }
+
+    pub fn empty_except(&self, pid: Pid) -> io::Result<bool> {
+        Ok(process::get_reaper_pids(None)?
+            .iter()
+            .all(|info| info.pid == pid))
     }
 
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {

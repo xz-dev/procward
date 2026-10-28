@@ -165,9 +165,12 @@ impl Inventory {
         }
         Ok(())
     }
-    pub fn advance(&mut self, phase: Phase) -> io::Result<()> {
+    pub fn advance(&mut self, phase: Phase, protected: Option<Pid>) -> io::Result<()> {
         let mut gone = Vec::new();
         for (pid, target) in &mut self.0 {
+            if Some(*pid) == protected {
+                continue;
+            }
             let current = match query(*pid) {
                 Ok(info) => info.as_ref().map(Identity::from_info),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
@@ -205,6 +208,10 @@ impl Inventory {
         }
         Ok(())
     }
+    pub fn empty_except(&self, pid: Pid) -> io::Result<bool> {
+        Ok(self.1.is_empty() && self.0.keys().all(|target| *target == pid))
+    }
+
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
         let signal = if paused {
             process::Signal::STOP
@@ -344,7 +351,7 @@ mod tests {
     fn unknown_observation_blocks_completion_without_signal_authority() {
         let mut inventory = Inventory::new();
         inventory.1.insert(process::getpid());
-        inventory.advance(Phase::Grace).unwrap();
+        inventory.advance(Phase::Grace, None).unwrap();
         assert!(!inventory.is_empty());
         assert!(query(process::getpid()).unwrap().is_some());
     }
@@ -423,7 +430,7 @@ mod tests {
                 inventory.0.contains_key(&worker),
                 "reparenting lost observed identity"
             );
-            inventory.advance(Phase::Grace).unwrap();
+            inventory.advance(Phase::Grace, None).unwrap();
             poll(|| {
                 inventory.refresh().unwrap();
                 inventory.is_empty()

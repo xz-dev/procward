@@ -386,3 +386,9 @@ pub fn responses(mode: &std::ffi::OsStr) {
         io::stdout().flush().unwrap();
     }
 }
+
+#[cfg(unix)]
+pub fn terminal_handoff() -> io::Result<u32> {
+    let (_transport, owner, _id, _raw) = accept()?;
+    Ok(owner)
+}

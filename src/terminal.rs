@@ -35,6 +35,9 @@ pub struct Terminal {
     raw: bool,
     pause: bool,
     size: termios::Winsize,
+    control: Option<std::os::unix::net::UnixStream>,
+    result_bytes: Vec<u8>,
+    released: bool,
 }
 impl Terminal {
     pub fn open() -> io::Result<Option<Self>> {
@@ -61,9 +64,17 @@ impl Terminal {
             raw: false,
             pause: false,
             size,
+            control: None,
+            result_bytes: Vec::new(),
+            released: false,
         }))
     }
-    pub fn command(&mut self, command: &OsStr, args: &[OsString]) -> io::Result<Command> {
+    pub fn command(
+        &mut self,
+        command: &OsStr,
+        args: &[OsString],
+        deadline: std::time::Duration,
+    ) -> io::Result<Command> {
         // signal-hook uses SA_RESTART; tty authority denial must return, not loop on SIGTTOU.
         unsafe {
             let mut action = std::mem::zeroed();
@@ -76,20 +87,78 @@ impl Terminal {
             }
         }
         let raw = self.user.as_ref().unwrap().as_raw_fd();
+        let (control, peer) = std::os::unix::net::UnixStream::pair()?;
+        control.set_nonblocking(true)?;
+        peer.set_nonblocking(true)?;
+        let peer_raw = peer.as_raw_fd();
+        self.control = Some(control);
         let mut launch = Command::new(std::env::current_exe()?);
         launch
             .arg("__terminal")
             .arg(raw.to_string())
+            .arg(peer_raw.to_string())
+            .arg(deadline.as_millis().to_string())
             .arg(command)
             .args(args);
         // Trusted bootstrap alone performs login_tty; no ProcessGroup/ProcessSession is stacked.
+        // The command owns the peer until spawn completes, then only the private keeper inherits it.
         unsafe {
             launch.pre_exec(move || {
-                rio::fcntl_setfd(BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
+                let _keep_peer = &peer;
+                for fd in [raw, peer_raw] {
+                    rio::fcntl_setfd(BorrowedFd::borrow_raw(fd), FdFlags::empty())?;
+                }
                 Ok(())
             });
         }
         Ok(launch)
+    }
+    pub fn result(&mut self) -> io::Result<Option<u8>> {
+        use std::io::Read;
+        if self.result_bytes.len() < 2 {
+            let mut bytes = [0; 3];
+            match self.control.as_mut().unwrap().read(&mut bytes) {
+                Ok(0) => {
+                    return Err(io::Error::other(
+                        "terminal keeper closed before primary result",
+                    ));
+                }
+                Ok(count) => self.result_bytes.extend_from_slice(&bytes[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match self.result_bytes.as_slice() {
+            [] | [b'X'] => Ok(None),
+            [b'X', code] => Ok(Some(*code)),
+            _ => Err(io::Error::other("invalid terminal primary result")),
+        }
+    }
+    pub fn release_if_drained(&mut self) -> io::Result<()> {
+        use std::io::Write;
+        if self.released || !self.output.is_empty() || rio::ioctl_fionread(&self.master)? != 0 {
+            return Ok(());
+        }
+        let mut queued: libc::c_int = 0;
+        if unsafe {
+            libc::ioctl(
+                self.user.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCOUTQ,
+                &mut queued,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if queued == 0 {
+            self.control.as_mut().unwrap().write_all(b"D")?;
+            self.released = true;
+        }
+        Ok(())
     }
     pub fn finish_output(&mut self) {
         self.user.take();
@@ -192,7 +261,7 @@ fn write_buffer(fd: &OwnedFd, source: &mut Vec<u8>) -> io::Result<()> {
 }
 
 pub fn exec(args: &[OsString]) -> io::Result<u8> {
-    let [raw, command, rest @ ..] = args else {
+    let [raw, control, deadline, command, rest @ ..] = args else {
         return Err(io::Error::other("invalid terminal bootstrap"));
     };
     let raw = raw
@@ -200,6 +269,27 @@ pub fn exec(args: &[OsString]) -> io::Result<u8> {
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|v| *v > 2)
         .ok_or_else(|| io::Error::other("invalid terminal endpoint"))?;
+    let control_raw = control
+        .to_str()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|v| *v > 2 && *v != raw)
+        .ok_or_else(|| io::Error::other("invalid terminal control endpoint"))?;
+    let control_fd = unsafe { BorrowedFd::borrow_raw(control_raw) };
+    if rustix::net::sockopt::socket_type(control_fd)? != rustix::net::SocketType::STREAM
+        || rustix::net::getsockname(control_fd)?.address_family()
+            != rustix::net::AddressFamily::UNIX
+    {
+        return Err(io::Error::other("invalid terminal control transport"));
+    }
+    rio::fcntl_setfd(control_fd, FdFlags::CLOEXEC)?;
+    let control = unsafe { std::os::unix::net::UnixStream::from_raw_fd(control_raw) };
+    control.set_nonblocking(true)?;
+    let deadline = deadline
+        .to_str()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(std::time::Duration::from_millis)
+        .ok_or_else(|| io::Error::other("invalid terminal drain deadline"))?;
     let fd = unsafe { BorrowedFd::borrow_raw(raw) };
     termios::tcgetattr(fd)?;
     let stderr = unsafe { BorrowedFd::borrow_raw(2) };
@@ -215,6 +305,10 @@ pub fn exec(args: &[OsString]) -> io::Result<u8> {
     if let Some(stderr) = saved_stderr {
         rustix::stdio::dup2_stderr(stderr)?;
     }
+    run_keeper(control, deadline, command, rest)
+}
+
+fn reset_payload_signals() -> io::Result<()> {
     // Native handlers/masks and shell-ignored job-control dispositions must not reach payload.
     unsafe {
         let mut empty = std::mem::zeroed();
@@ -222,11 +316,43 @@ pub fn exec(args: &[OsString]) -> io::Result<u8> {
         if libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0 {
             return Err(io::Error::last_os_error());
         }
-        for signal in [libc::SIGTTIN, libc::SIGTTOU, libc::SIGTSTP] {
+        for signal in [libc::SIGTTIN, libc::SIGTTOU, libc::SIGTSTP, libc::SIGPIPE] {
             libc::signal(signal, libc::SIG_DFL);
         }
     }
-    exec_payload(command, rest)
+    Ok(())
+}
+
+pub fn exec_ready(args: &[OsString]) -> io::Result<u8> {
+    let [grant, command, rest @ ..] = args else {
+        return Err(io::Error::other("invalid terminal launch invocation"));
+    };
+    let grant = crate::owner::inherited_fd(grant, OFlags::RDONLY)?;
+    let expected = std::env::var("PROCWARD_OWNER_PID")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .and_then(process::Pid::from_raw)
+        .ok_or_else(|| io::Error::other("invalid terminal launch parent"))?;
+    loop {
+        let mut byte = [0];
+        match rio::read(&grant, &mut byte) {
+            Ok(1) if byte[0] == b'R' => break,
+            Err(Errno::AGAIN | Errno::INTR) => {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
+            _ => return Err(io::Error::other("terminal launch permission ended")),
+        }
+    }
+    if process::getppid() != Some(expected) {
+        return Err(io::Error::other("terminal launch parent lost"));
+    }
+    drop(grant);
+    reset_payload_signals()?;
+    let result = exec_payload(command, rest);
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+    result
 }
 
 fn exec_payload(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
@@ -285,4 +411,125 @@ fn exec_payload(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
     } else {
         libc::ENOENT
     }))
+}
+
+fn run_keeper(
+    mut control: std::os::unix::net::UnixStream,
+    deadline: std::time::Duration,
+    command: &OsStr,
+    args: &[OsString],
+) -> io::Result<u8> {
+    use process_wrap::std::{CommandWrap, ProcessGroup};
+    use signal_hook::{
+        consts::{SIGCHLD, SIGHUP, SIGINT, SIGTERM, SIGTTIN, SIGTTOU},
+        iterator::Signals,
+    };
+    use std::{
+        io::{Read, Write},
+        os::unix::process::ExitStatusExt,
+        time::Instant,
+    };
+    let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM, SIGTTIN, SIGTTOU])?;
+    let (grant_read, grant_write) = crate::owner::pipe()?;
+    let raw = grant_read.as_raw_fd();
+    let mut handoff = crate::contract::Handoff::new()?;
+    let mut payload = Command::new(std::env::current_exe()?);
+    payload
+        .arg("__terminal_exec")
+        .arg(raw.to_string())
+        .arg(command)
+        .args(args);
+    crate::contract::clear(&mut payload);
+    payload.envs(handoff.environment()?);
+    unsafe {
+        payload.pre_exec(move || {
+            let _keep_grant = &grant_read;
+            rio::fcntl_setfd(BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
+            Ok(())
+        });
+    }
+    let mut child = CommandWrap::from(payload)
+        .wrap(ProcessGroup::leader())
+        .spawn()?;
+    let primary = process::Pid::from_raw(child.id() as i32).unwrap();
+    termios::tcsetpgrp(unsafe { BorrowedFd::borrow_raw(0) }, primary)?;
+    handoff.ready(child.id())?;
+    let mut byte = [0];
+    match control.read(&mut byte) {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        _ => return Err(io::Error::other("terminal relay lost before launch grant")),
+    }
+    if signals
+        .pending()
+        .any(|signal| matches!(signal, SIGHUP | SIGINT | SIGTERM))
+    {
+        return Err(io::Error::other("terminal launch cancelled"));
+    }
+    rio::write(&grant_write, b"R")?;
+    drop(grant_write);
+    let mut result = None;
+    let mut closing = false;
+    let mut started: Option<Instant> = None;
+    loop {
+        if result.is_none() {
+            if let Some(status) = child.inner_mut().try_wait()? {
+                let code = status
+                    .code()
+                    .or_else(|| status.signal().map(|v| 128 + v))
+                    .ok_or_else(|| io::Error::other("terminal primary result missing"))?
+                    as u8;
+                control.write_all(&[b'X', code])?;
+                result = Some(code);
+                started.get_or_insert_with(Instant::now);
+            }
+        }
+        let request = signals
+            .pending()
+            .find(|signal| matches!(*signal, SIGHUP | SIGINT | SIGTERM));
+        let mut drained = false;
+        let relay_alive = match control.read(&mut byte) {
+            Ok(0) => false,
+            Ok(1) if byte[0] == b'D' && result.is_some() => {
+                drained = true;
+                true
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                true
+            }
+            Err(error) => return Err(error),
+            _ => return Err(io::Error::other("invalid terminal drain acknowledgement")),
+        };
+        if !closing && (!relay_alive || request.is_some()) {
+            closing = true;
+            started.get_or_insert_with(Instant::now);
+            handoff.owner_lost()?;
+            if result.is_none() {
+                let mut forward = Vec::new();
+                if let Some(signal) = request.filter(|v| *v != SIGTERM) {
+                    forward.push(process::Signal::from_named_raw(signal).unwrap());
+                }
+                forward.extend([process::Signal::TERM, process::Signal::CONT]);
+                for signal in forward {
+                    match process::kill_process_group(primary, signal) {
+                        Ok(()) | Err(Errno::SRCH) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+        if let Some(code) = result {
+            if drained || closing {
+                return Ok(code);
+            }
+        }
+        if started.is_some_and(|start| start.elapsed() >= deadline) {
+            return Err(io::Error::other("terminal drain deadline expired"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }

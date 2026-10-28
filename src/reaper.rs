@@ -62,9 +62,13 @@ pub fn run_owned(
         signal_hook::consts::SIGCONT,
     ])?;
     children()?;
-    let mut handoff = crate::contract::Handoff::new()?;
+    let mut handoff = if terminal.is_none() {
+        Some(crate::contract::Handoff::new()?)
+    } else {
+        None
+    };
     let mut payload = if let Some(terminal) = &mut terminal {
-        terminal.command(command, args)?
+        terminal.command(command, args, config.deadline)?
     } else {
         let mut payload = Command::new(command);
         payload.args(args);
@@ -72,7 +76,9 @@ pub fn run_owned(
     };
     crate::contract::clear(&mut payload);
     payload.env_remove("PROCWARD_PRIVATE_TASK");
-    payload.envs(handoff.environment()?);
+    if let Some(handoff) = &handoff {
+        payload.envs(handoff.environment()?);
+    }
     if !crate::owner::alive(lease)? {
         return Err(io::Error::other(
             "owner lost before payload launch permission",
@@ -87,7 +93,9 @@ pub fn run_owned(
             .spawn()?
     };
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
-    let ready = handoff.ready(child.id());
+    let ready = handoff
+        .as_mut()
+        .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
     let mut result = None;
     let mut requested = None;
@@ -109,6 +117,13 @@ pub fn run_owned(
             if !alive {
                 owner_lost = true;
                 return Ok(());
+            }
+            if let Some(terminal) = &mut terminal {
+                if let Some(code) = terminal.result()? {
+                    result = Some(code);
+                    let _ = rustix::io::write(notice, &[b'X', code]);
+                    return Ok(());
+                }
             }
             match process::waitid(
                 WaitId::Pid(primary),
@@ -182,7 +197,9 @@ pub fn run_owned(
     let policy = Policy::new(config, false);
     let published = crate::owner::publish(notice, policy);
     let notified = if owner_lost || requested.is_some() || observed.is_err() {
-        handoff.owner_lost()
+        handoff
+            .as_mut()
+            .map_or(Ok(()), |handoff| handoff.owner_lost())
     } else {
         Ok(())
     };
@@ -190,9 +207,34 @@ pub fn run_owned(
         Some(signal) => child.signal(signal),
         None => Ok(()),
     };
-    let fatal = observed.is_err() || requested.is_some() || owner_lost;
+    let mut fatal = observed.is_err() || requested.is_some() || owner_lost;
     let result_sent = result.is_some();
-    cleanup(&mut inventory, Some(primary), &mut result, policy)?;
+    cleanup(
+        &mut inventory,
+        Some(primary),
+        &mut result,
+        policy,
+        |inventory| {
+            if let Some(terminal) = &mut terminal {
+                if !fatal {
+                    if !crate::owner::alive(lease)?
+                        || signals
+                            .pending()
+                            .any(|signal| matches!(signal, SIGHUP | SIGINT | SIGTERM))
+                    {
+                        fatal = true;
+                    } else {
+                        terminal.drain()?;
+                        if inventory.empty_except(primary)? {
+                            terminal.release_if_drained()?;
+                        }
+                        return Ok(Some(primary));
+                    }
+                }
+            }
+            Ok(None)
+        },
+    )?;
     if !result_sent {
         if let Some(code) = result {
             let _ = rustix::io::write(notice, &[b'X', code]);
@@ -252,6 +294,7 @@ pub(crate) fn cleanup(
     primary: Option<Pid>,
     result: &mut Option<u8>,
     policy: Policy,
+    mut before_advance: impl FnMut(&mut Inventory) -> io::Result<Option<Pid>>,
 ) -> io::Result<()> {
     loop {
         let phase = policy.phase(crate::policy::now());
@@ -261,7 +304,8 @@ pub(crate) fn cleanup(
             ));
         }
         inventory.refresh()?;
-        inventory.advance(phase)?;
+        let protected = before_advance(inventory)?;
+        inventory.advance(phase, protected)?;
         match process::wait(WaitOptions::NOHANG) {
             Ok(Some((pid, status))) => {
                 if let Some(code) = status
@@ -269,7 +313,12 @@ pub(crate) fn cleanup(
                     .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
                 {
                     inventory.forget(pid);
-                    if Some(pid) == primary && result.is_none() {
+                    if Some(pid) == primary {
+                        if result.is_some_and(|expected| expected != code as u8) {
+                            return Err(io::Error::other(
+                                "terminal keeper did not preserve primary result",
+                            ));
+                        }
                         *result = Some(code as u8);
                     }
                 } else if !status.stopped() && !status.continued() {

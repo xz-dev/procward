@@ -246,7 +246,7 @@ pub(crate) fn finish_anchor(
     if status.signal().is_some() {
         crate::diagnostic("macOS best-effort observer lost; pre-observation descendants may escape after reparenting".into());
     }
-    crate::reaper::cleanup(observed, None, &mut None, policy)?;
+    crate::reaper::cleanup(observed, None, &mut None, policy, |_| Ok(None))?;
     Ok(status.code().unwrap_or(125) as u8)
 }
 
@@ -281,7 +281,7 @@ fn validate_endpoint(fd: rustix::fd::BorrowedFd<'_>, access: rustix::fs::OFlags)
     Ok(())
 }
 
-fn inherited_fd(value: &OsStr, access: rustix::fs::OFlags) -> io::Result<OwnedFd> {
+pub(crate) fn inherited_fd(value: &OsStr, access: rustix::fs::OFlags) -> io::Result<OwnedFd> {
     let raw = value
         .to_str()
         .and_then(|s| s.parse::<i32>().ok())
@@ -451,7 +451,9 @@ pub(crate) mod tests {
                     let deadline = Instant::now() + Duration::from_secs(3);
                     loop {
                         self.observed.refresh().unwrap();
-                        self.observed.advance(crate::policy::Phase::Kill).unwrap();
+                        self.observed
+                            .advance(crate::policy::Phase::Kill, None)
+                            .unwrap();
                         if self.observed.is_empty() {
                             break;
                         }
