@@ -133,7 +133,9 @@ tag fails before building. No previously uploaded branch artifact is reused.
    `procward-<target>.zip` and `procward-<target>-debug.zip` with maximum
    DEFLATE compression. Each contains `procward`/`procward.exe`, `LICENSE`,
    `README.md` and `third-party-licenses.md`, plus PDB/dSYM in Windows/macOS debug
-   zips. No executable is repackaged later.
+   zips. Distribution documents use LF checkouts on every OS via `.gitattributes`;
+   fan-in compares their exact bytes, not newline-normalized text. No executable
+   is repackaged later.
 3. Require all 24 zips and exact embedded binary/document bytes. Generate
    `SHA256SUMS` over the 24 downloadable zips, not itself. Changing any package or
    embedded subject after freezing fails verification.
