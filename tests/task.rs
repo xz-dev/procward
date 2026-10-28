@@ -6,6 +6,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(unix)]
 fn pair() -> (fs::File, fs::File, &'static str, String) {
     use std::os::{
@@ -147,15 +149,20 @@ impl Task {
             .parent()
             .unwrap()
             .join(format!("examples/fixture{}", std::env::consts::EXE_SUFFIX));
+        let (grace, fatal, deadline) = if mode == "task-tree" {
+            ("2s", "1s", "2500ms")
+        } else {
+            ("500ms", "250ms", "1500ms")
+        };
         let process = Command::new(env!("CARGO_BIN_EXE_procward"))
             .args([
                 "run",
                 "--grace",
-                "500ms",
+                grace,
                 "--fatal-grace",
-                "250ms",
+                fatal,
                 "--cleanup-deadline",
-                "1500ms",
+                deadline,
                 option,
                 &raw,
                 "--",
@@ -252,6 +259,9 @@ fn completion(transcript: &str, eof: bool) -> Result<u32, &'static str> {
 }
 #[test]
 fn task_completion_requires_native_result_cleanup_acknowledgement_and_transport_eof() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut task = Task::start("exit", "23");
     task.until(|t| t.eof);
     assert_eq!(completion(&task.transcript, task.eof), Ok(23));
@@ -283,6 +293,9 @@ fn task_completion_requires_native_result_cleanup_acknowledgement_and_transport_
 }
 #[test]
 fn task_cancellation_is_bounded_and_invalid_control_never_acknowledges_success() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("procward-task-cancel-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     for malformed in [false, true] {
@@ -315,6 +328,9 @@ fn task_cancellation_is_bounded_and_invalid_control_never_acknowledges_success()
 
 #[test]
 fn task_is_non_session_and_does_not_leak_its_controller_endpoint() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("procward-task-mode-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let mut task = Task::start("task-probe", dir.to_str().unwrap());
@@ -332,6 +348,9 @@ fn task_is_non_session_and_does_not_leak_its_controller_endpoint() {
 
 #[test]
 fn invalid_control_options_and_endpoints_refuse_payload_side_effects() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let marker =
         std::env::temp_dir().join(format!("procward-invalid-control-{}", std::process::id()));
     let fixture = std::env::current_exe()
@@ -357,4 +376,136 @@ fn invalid_control_options_and_endpoints_refuse_payload_side_effects() {
         assert_eq!(output.status.code(), Some(expected), "{value}: {output:?}");
         assert!(!marker.exists());
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn primary_result_precedes_tree_completion_and_controller_loss_cannot_acknowledge_it() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    use rustix::{
+        io::Errno,
+        process::{self, Pid, Signal},
+    };
+    for lose_controller in [false, true] {
+        let dir = std::env::temp_dir().join(format!(
+            "procward-task-tree-{}-{lose_controller}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let mut task = Task::start("task-tree", dir.to_str().unwrap());
+        task.until(|_| {
+            dir.join("task-worker-ready").exists()
+                && fs::read_to_string(dir.join("task-anchor"))
+                    .ok()
+                    .is_some_and(|v| v.parse::<i32>().is_ok())
+        });
+        let worker = Pid::from_raw(
+            fs::read_to_string(dir.join("task-worker.pid"))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let fault = Instant::now();
+        task.child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        task.until(|t| t.transcript.contains("PROCWARD/1 X 23\n"));
+        assert!(
+            !task.transcript.contains("PROCWARD/1 C "),
+            "primary result must precede live-tree cleanup"
+        );
+        assert!(
+            process::test_kill_process(worker).is_ok(),
+            "ignoring worker must still be alive during grace"
+        );
+        if lose_controller {
+            let anchor = Pid::from_raw(
+                fs::read_to_string(dir.join("task-anchor"))
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+            process::kill_process(anchor, Signal::KILL).unwrap();
+        }
+        task.until(|t| t.eof);
+        assert!(
+            fault.elapsed() < Duration::from_secs(3),
+            "original configured tree deadline"
+        );
+        assert_eq!(
+            process::test_kill_process(worker),
+            Err(Errno::SRCH),
+            "C/error transport close must not leave known worker"
+        );
+        if lose_controller {
+            assert!(
+                task.transcript.contains("PROCWARD/1 E 125\n"),
+                "{}",
+                task.transcript
+            );
+            assert!(
+                !task.transcript.contains("PROCWARD/1 C "),
+                "controller failure after X must not claim success"
+            );
+            assert_eq!(task.child.wait().unwrap().code(), Some(125));
+        } else {
+            assert_eq!(completion(&task.transcript, true), Ok(23));
+            assert_eq!(task.child.wait().unwrap().code(), Some(23));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn malformed_task_control_cannot_block_final_error_on_full_stderr() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("procward-task-stderr-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let mut task = Task::start("blocked-stderr", dir.to_str().unwrap());
+    task.until(|t| {
+        let stderr = t.child.stderr.as_ref().unwrap();
+        #[cfg(unix)]
+        {
+            rustix::io::ioctl_fionread(stderr).unwrap() > 0
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let mut available = 0;
+            assert_ne!(
+                unsafe {
+                    windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                        stderr.as_raw_handle(),
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            available > 0
+        }
+    });
+    let fault = Instant::now();
+    task.endpoint.write_all(b"PROCWARD/1 INVALID\n").unwrap();
+    task.until(|t| t.eof);
+    let status = loop {
+        if let Some(status) = task.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            fault.elapsed() < Duration::from_secs(2),
+            "final error reporting blocked on payload-filled stderr"
+        );
+        thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(status.code(), Some(125));
+    assert!(!task.transcript.contains("PROCWARD/1 C "));
+    fs::remove_dir_all(dir).unwrap();
 }

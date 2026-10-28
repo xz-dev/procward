@@ -40,6 +40,10 @@ path = "tests/contract.rs"
 name = "task"
 path = "tests/task.rs"
 
+[[test]]
+name = "interaction"
+path = "tests/interaction.rs"
+
 [[example]]
 name = "fixture"
 path = "tests/fixtures/main.rs"

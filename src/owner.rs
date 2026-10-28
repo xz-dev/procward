@@ -244,9 +244,7 @@ pub(crate) fn finish_anchor(
 ) -> io::Result<u8> {
     #[cfg(target_os = "macos")]
     if status.signal().is_some() {
-        eprintln!(
-            "procward: macOS best-effort observer lost; pre-observation descendants may escape after reparenting"
-        );
+        crate::diagnostic("macOS best-effort observer lost; pre-observation descendants may escape after reparenting".into());
     }
     crate::reaper::cleanup(observed, None, &mut None, policy)?;
     Ok(status.code().unwrap_or(125) as u8)

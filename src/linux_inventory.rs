@@ -182,9 +182,11 @@ fn open_identity(pid: Pid) -> io::Result<Option<OwnedFd>> {
         Ok(fd) => fd,
         Err(Errno::SRCH) => return Ok(None),
         Err(Errno::NOSYS | Errno::PERM | Errno::INVAL) => {
-            eprintln!(
-                "procward: pidfd unavailable; nondirect freezing unsupported, direct-child reaper cleanup remains active"
-            );
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::diagnostic("pidfd unavailable; nondirect freezing unsupported, direct-child reaper cleanup remains active".into());
+            }
             return Ok(None);
         }
         Err(error) => return Err(error.into()),

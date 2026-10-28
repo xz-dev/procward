@@ -210,7 +210,7 @@ fn parent_matches(owner: u32, identity: &str) -> io::Result<bool> {
         && unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == WAIT_TIMEOUT)
 }
 
-pub fn probe(dir: &Path) -> io::Result<()> {
+fn accept() -> io::Result<(Transport, u32, String, String)> {
     if env::var("PROCWARD_PROTOCOL").ok().as_deref() != Some("1") {
         return Err(io::Error::other("unsupported or absent managed protocol"));
     }
@@ -242,6 +242,11 @@ pub fn probe(dir: &Path) -> io::Result<()> {
             env::remove_var(name);
         }
     }
+    Ok((transport, owner, id, raw))
+}
+
+pub fn probe(dir: &Path) -> io::Result<()> {
+    let (_transport, owner, id, raw) = accept()?;
     let status = Command::new(env::current_exe()?)
         .arg("managed-ordinary")
         .arg(&raw)
@@ -326,4 +331,58 @@ pub fn task_probe(dir: &Path) -> io::Result<()> {
         }
     }
     probe(dir)
+}
+
+#[cfg(unix)]
+pub fn owner_loss(dir: &Path, blocked: bool) -> io::Result<()> {
+    let (mut transport, owner, id, _raw) = accept()?;
+    signal_hook::flag::register(
+        signal_hook::consts::SIGTERM,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    for (name, value) in [("primary", process::id()), ("anchor", owner)] {
+        let temporary = dir.join(format!("{name}.tmp"));
+        fs::write(&temporary, value.to_string())?;
+        fs::rename(temporary, dir.join(name))?;
+    }
+    fs::write(dir.join("ready"), b"ready")?;
+    if blocked {
+        loop {
+            thread::park();
+        }
+    }
+    let record = transport.line(Instant::now() + Duration::from_secs(20))?;
+    let evidence = if let Some(record) = record {
+        if record != format!("PROCWARD/1 OWNER-LOSS {id}\n") {
+            return Err(io::Error::other("invalid owner-loss notice"));
+        }
+        "notice"
+    } else {
+        "EOF"
+    };
+    fs::write(dir.join("notification"), evidence)?;
+    Ok(())
+}
+
+pub fn responses(mode: &std::ffi::OsStr) {
+    use std::io::{BufRead, Write};
+    let mode = mode.to_str().unwrap();
+    println!("RESPONSE-READY {}", env::var("PROCWARD_OWNER_PID").unwrap());
+    io::stdout().flush().unwrap();
+    let mut attempts = 0;
+    for line in io::stdin().lock().lines() {
+        assert_eq!(line.unwrap(), "quit");
+        attempts += 1;
+        if mode == "silence" {
+            continue;
+        }
+        if mode == "hints" || attempts <= 3 {
+            println!("NOT-READY");
+        } else {
+            println!("BYE {attempts}");
+            io::stdout().flush().unwrap();
+            process::exit(23);
+        }
+        io::stdout().flush().unwrap();
+    }
 }

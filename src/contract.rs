@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
 #[cfg(unix)]
 use std::io::Read;
-// SPDX-License-Identifier: BSD-3-Clause
 use std::{
     ffi::OsStr,
     io::{self, Write},

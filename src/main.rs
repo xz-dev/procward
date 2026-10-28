@@ -33,8 +33,8 @@ fn main() -> ExitCode {
             ExitCode::from(code as u8)
         }
         Err((code, message)) => {
-            eprintln!("procward: {message}");
-            ExitCode::from(code)
+            diagnostic(message);
+            std::process::exit(i32::from(code));
         }
     }
 }
@@ -80,7 +80,7 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             ))]
             {
                 if let Some(task) = &mut task {
-                    task.complete(result.is_ok(), config.deadline)
+                    task.complete(result.as_ref().ok().copied(), config.deadline)
                         .map_err(|error| (125, error.to_string()))?;
                 }
                 result.map_err(|error| (125, error.to_string()))
@@ -100,5 +100,20 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             125,
             "expected run [options] -- <command> [args...]; see --help".into(),
         )),
+    }
+}
+
+pub(crate) fn diagnostic(message: String) {
+    use std::{io::Write, sync::mpsc, time::Duration};
+    let (send, receive) = mpsc::sync_channel(1);
+    // A full inherited stderr must not retain a cleaned controller or block failover.
+    if std::thread::Builder::new()
+        .spawn(move || {
+            let _ = writeln!(std::io::stderr(), "procward: {message}");
+            let _ = send.send(());
+        })
+        .is_ok()
+    {
+        let _ = receive.recv_timeout(Duration::from_millis(50));
     }
 }

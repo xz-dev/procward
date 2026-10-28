@@ -180,3 +180,170 @@ fn managed_handoff_is_direct_bounded_one_shot_and_separate_from_native_ownership
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn owner_loss_notifies_cooperative_primary_and_bounds_blocked_primary_by_configured_policy() {
+    use rustix::{
+        io::Errno,
+        process::{self, Pid, Signal, WaitOptions},
+    };
+    #[cfg(target_os = "linux")]
+    process::set_child_subreaper(Some(Pid::INIT)).unwrap();
+    #[cfg(target_os = "freebsd")]
+    process::set_reaper_status(true).unwrap();
+    fn gone(raw: u32) -> bool {
+        let pid = Pid::from_raw(raw as i32).unwrap();
+        match process::waitpid(Some(pid), WaitOptions::NOHANG) {
+            Ok(Some((_, status))) => {
+                assert!(status.exit_status().is_some() || status.terminating_signal().is_some())
+            }
+            Ok(None) | Err(Errno::CHILD | Errno::INTR) => {}
+            Err(error) => panic!("owned-child wait failed: {error}"),
+        }
+        match process::test_kill_process(pid) {
+            Err(Errno::SRCH) => true,
+            Ok(()) => false,
+            Err(error) => panic!("identity query failed: {error}"),
+        }
+    }
+    struct Case {
+        owner: std::process::Child,
+        dir: std::path::PathBuf,
+        targets: Vec<u32>,
+        done: bool,
+        #[cfg(target_os = "macos")]
+        identities: Vec<libproc::bsd_info::BSDInfo>,
+    }
+    impl Drop for Case {
+        fn drop(&mut self) {
+            if !self.done {
+                eprintln!("HARNESS RESCUE: owner-loss fixture; not product cleanup");
+                let _ = self.owner.kill();
+                let _ = self.owner.wait();
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !self.targets.iter().copied().all(gone) && Instant::now() < deadline {
+                    for raw in self.targets.iter().rev() {
+                        let pid = Pid::from_raw(*raw as i32).unwrap();
+                        #[cfg(not(target_os = "macos"))]
+                        if matches!(process::waitpid(Some(pid), WaitOptions::NOHANG), Ok(None)) {
+                            let _ = process::kill_process(pid, Signal::KILL);
+                        }
+                        #[cfg(target_os = "macos")]
+                        if let Ok(now) =
+                            libproc::proc_pid::pidinfo::<libproc::bsd_info::BSDInfo>(*raw as i32, 0)
+                        {
+                            if self.identities.iter().any(|old| {
+                                (
+                                    old.pbi_pid,
+                                    old.pbi_start_tvsec,
+                                    old.pbi_start_tvusec,
+                                    old.pbi_uid,
+                                    old.pbi_ruid,
+                                    old.pbi_svuid,
+                                ) == (
+                                    now.pbi_pid,
+                                    now.pbi_start_tvsec,
+                                    now.pbi_start_tvusec,
+                                    now.pbi_uid,
+                                    now.pbi_ruid,
+                                    now.pbi_svuid,
+                                )
+                            }) {
+                                let _ = process::kill_process(pid, Signal::KILL);
+                            }
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+    for mode in ["cooperative", "blocked", "EOF"] {
+        let dir = std::env::temp_dir().join(format!(
+            "procward-owner-contract-{}-{mode}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let owner = Command::new(env!("CARGO_BIN_EXE_procward"))
+            .args([
+                "run",
+                "--grace",
+                "1s",
+                "--fatal-grace",
+                "500ms",
+                "--cleanup-deadline",
+                "1500ms",
+                "--",
+            ])
+            .arg(fixture())
+            .arg(if mode == "blocked" {
+                "managed-blocked"
+            } else {
+                "managed-owner"
+            })
+            .arg(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut case = Case {
+            owner,
+            dir,
+            targets: Vec::new(),
+            done: false,
+            #[cfg(target_os = "macos")]
+            identities: Vec::new(),
+        };
+        let startup = Instant::now() + Duration::from_secs(20);
+        while !case.dir.join("ready").exists() {
+            assert!(Instant::now() < startup, "managed startup deadline");
+            thread::sleep(Duration::from_millis(2));
+        }
+        for name in ["primary", "anchor"] {
+            let raw: u32 = fs::read_to_string(case.dir.join(name))
+                .unwrap()
+                .parse()
+                .unwrap();
+            case.targets.push(raw);
+            #[cfg(target_os = "macos")]
+            case.identities.push(
+                libproc::proc_pid::pidinfo::<libproc::bsd_info::BSDInfo>(raw as i32, 0).unwrap(),
+            );
+        }
+        let fault = Instant::now();
+        if mode == "EOF" {
+            process::kill_process(Pid::from_raw(case.targets[1] as i32).unwrap(), Signal::KILL)
+                .unwrap();
+        } else {
+            case.owner.kill().unwrap();
+        }
+        let deadline = fault + Duration::from_secs(2);
+        while !case.targets.iter().copied().all(gone) || case.owner.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "{mode}: original configured deadline exceeded"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        if mode == "blocked" {
+            assert!(
+                fault.elapsed() >= Duration::from_secs(1),
+                "configured ordinary grace must not be skipped"
+            );
+            assert!(
+                !case.dir.join("notification").exists(),
+                "blocked main loop cannot fake observing notification"
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(case.dir.join("notification")).unwrap(),
+                if mode == "EOF" { "EOF" } else { "notice" }
+            );
+        }
+        assert!(!case.owner.wait().unwrap().success());
+        case.done = true;
+    }
+}

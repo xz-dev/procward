@@ -203,8 +203,9 @@ impl Task {
         let count = bytes.len().min(available as usize);
         self.transport.read(&mut bytes[..count])
     }
-    pub fn complete(&mut self, success: bool, deadline: Duration) -> io::Result<()> {
-        if success && !self.invalid && self.result.is_some() {
+    pub fn complete(&mut self, result: Option<u32>, deadline: Duration) -> io::Result<()> {
+        let confirmed = result.is_some() && result == self.result;
+        if confirmed && !self.invalid {
             self.record(&format!("C {}", scope()))?;
         } else {
             self.record("E 125")?;
@@ -217,7 +218,7 @@ impl Task {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        if self.invalid || (success && self.result.is_none()) {
+        if self.invalid || (result.is_some() && !confirmed) {
             return Err(io::Error::other(
                 "task primary result or valid control missing",
             ));

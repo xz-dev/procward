@@ -34,6 +34,7 @@ pub struct Terminal {
     eof: bool,
     raw: bool,
     pause: bool,
+    size: termios::Winsize,
 }
 impl Terminal {
     pub fn open() -> io::Result<Option<Self>> {
@@ -59,6 +60,7 @@ impl Terminal {
             eof: false,
             raw: false,
             pause: false,
+            size,
         }))
     }
     pub fn command(&mut self, command: &OsStr, args: &[OsString]) -> io::Result<Command> {
@@ -89,17 +91,8 @@ impl Terminal {
         }
         Ok(launch)
     }
-    pub fn finish_output(&mut self) -> io::Result<()> {
-        if let Some(user) = &self.user {
-            let mut queued: libc::c_int = 0;
-            if unsafe { libc::ioctl(user.as_raw_fd(), libc::TIOCOUTQ, &mut queued) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if queued == 0 && rio::ioctl_fionread(&self.master)? == 0 && self.output.is_empty() {
-                self.user.take();
-            }
-        }
-        Ok(())
+    pub fn finish_output(&mut self) {
+        self.user.take();
     }
     pub fn foreground(&self) -> io::Result<bool> {
         Ok(termios::tcgetpgrp(&self.physical)? == process::getpgrp())
@@ -114,7 +107,18 @@ impl Terminal {
             termios::tcsetattr(&self.physical, OptionalActions::Now, &raw)?;
             self.raw = true;
         }
-        termios::tcsetwinsize(&self.master, termios::tcgetwinsize(&self.physical)?)?;
+        let size = termios::tcgetwinsize(&self.physical)?;
+        if (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
+            != (
+                self.size.ws_row,
+                self.size.ws_col,
+                self.size.ws_xpixel,
+                self.size.ws_ypixel,
+            )
+        {
+            termios::tcsetwinsize(&self.master, size)?;
+            self.size = size;
+        }
         read_buffer(&self.physical, &mut self.input, false)?;
         let suspend = self.saved.special_codes[termios::SpecialCodeIndex::VSUSP];
         if suspend != 0 && self.input.contains(&suspend) {
@@ -123,8 +127,13 @@ impl Terminal {
             return Ok(());
         }
         write_buffer(&self.master, &mut self.input)?;
-        self.eof |= read_buffer(&self.master, &mut self.output, true)?;
-        write_buffer(&self.physical, &mut self.output)?;
+        self.drain()
+    }
+    pub fn drain(&mut self) -> io::Result<()> {
+        if self.foreground()? {
+            self.eof |= read_buffer(&self.master, &mut self.output, true)?;
+            write_buffer(&self.physical, &mut self.output)?;
+        }
         Ok(())
     }
     pub fn pause_requested(&mut self) -> bool {

@@ -19,6 +19,17 @@ mod windows;
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        "responses" => managed::responses(&args[2]),
+        #[cfg(unix)]
+        "managed-owner" | "managed-blocked" => {
+            if let Err(error) =
+                managed::owner_loss(Path::new(&args[2]), args[1] == "managed-blocked")
+            {
+                eprintln!("REJECTED: {error}");
+                process::exit(125);
+            }
+            process::exit(23);
+        }
         "task-probe" => {
             if let Err(error) = managed::task_probe(Path::new(&args[2])) {
                 eprintln!("REJECTED: {error}");
@@ -290,6 +301,36 @@ fn main() {
                     wait_for(&dir.join("worker.pid"));
                     wait_for(&dir.join("release"));
                     process::exit(23);
+                }
+                #[cfg(unix)]
+                "task-tree" => {
+                    let _worker = spawn("task-worker", dir);
+                    fs::write(
+                        dir.join("task-anchor"),
+                        env::var("PROCWARD_OWNER_PID").unwrap(),
+                    )
+                    .unwrap();
+                    wait_for(&dir.join("task-worker-ready"));
+                    wait_for_input();
+                    process::exit(23);
+                }
+                #[cfg(unix)]
+                "task-worker" => {
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                    fs::write(dir.join("task-worker-ready"), b"ready").unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
+                "blocked-stderr" => {
+                    io::stderr()
+                        .write_all(&vec![b'e'; 2 * 1024 * 1024])
+                        .unwrap();
+                    wait_for_input();
                 }
                 "tree" => {
                     let _branch = spawn("branch", dir);

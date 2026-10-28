@@ -200,6 +200,7 @@ pub fn run_owned(
     }
     if let Some(terminal) = &mut terminal {
         if !fatal {
+            terminal.finish_output();
             while !terminal.drained() {
                 if !crate::owner::alive(lease)?
                     || signals
@@ -208,8 +209,7 @@ pub fn run_owned(
                 {
                     break;
                 }
-                terminal.pump()?;
-                terminal.finish_output()?;
+                terminal.drain()?;
                 thread::sleep(Duration::from_millis(2));
             }
         }
