@@ -12,6 +12,7 @@ use std::{
 mod pipes;
 
 const DEADLINE: Duration = Duration::from_millis(2500);
+static SCENARIOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn poll(deadline: Instant, mut condition: impl FnMut() -> bool) {
     while !condition() {
         assert!(
@@ -213,7 +214,7 @@ impl Run {
         static CALLER_HYGIENE: std::sync::Once = std::sync::Once::new();
         CALLER_HYGIENE.call_once(|| {
             // CI runners leave unrelated pipes inheritable; launch with only stdio, not runner internals.
-            for raw in pipes::open().unwrap() {
+            for raw in pipes::open(true).unwrap() {
                 #[cfg(unix)]
                 rustix::io::fcntl_setfd(
                     unsafe { rustix::fd::BorrowedFd::borrow_raw(raw as i32) },
@@ -412,6 +413,7 @@ impl Drop for Run {
 
 #[test]
 fn nested_layers_preserve_status_and_clean_on_each_owner_loss() {
+    let _guard = SCENARIOS.lock().unwrap();
     for mode in ["exit", "outer-loss", "inner-loss"] {
         let mut run = Run::start(mode, "nested-tree");
         let inner = run.ready();
@@ -459,12 +461,14 @@ fn nested_layers_preserve_status_and_clean_on_each_owner_loss() {
 
 #[test]
 fn nested_payload_has_only_inner_contract_metadata_and_transport() {
+    let _guard = SCENARIOS.lock().unwrap();
     let mut run = Run::start("isolation", "nested-probe");
     let status = run.finish(Instant::now() + Duration::from_secs(30));
     assert_eq!(
         status.code(),
         Some(23),
-        "nested contract isolation: outer={} inner={:?}; {:?}",
+        "nested contract isolation: harness={} outer={} inner={:?}; {:?}",
+        std::process::id(),
         run.child.id(),
         fs::read_to_string(run.dir.join("inner-anchor")),
         fs::read_to_string(run.dir.join("stderr.log"))

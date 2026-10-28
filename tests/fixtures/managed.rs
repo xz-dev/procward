@@ -286,7 +286,7 @@ pub fn nested(dir: &Path, probe: bool) -> io::Result<()> {
 
 fn only_inner_pipe(raw: &str) -> io::Result<()> {
     let inner = raw.parse::<usize>().map_err(io::Error::other)?;
-    let pipes = super::pipes::open()?;
+    let pipes = super::pipes::open(false)?;
     #[cfg(windows)]
     if pipes != [inner] {
         use windows_sys::Win32::{

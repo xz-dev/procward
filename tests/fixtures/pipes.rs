@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Enumerate every non-stdio pipe, both for caller hygiene and the payload's isolation assertion.
+//! Enumerate pipe objects for caller hygiene and the payload's isolation assertion.
 use std::io;
 
 #[cfg(unix)]
-pub fn open() -> io::Result<Vec<usize>> {
+pub fn open(_include_stdio: bool) -> io::Result<Vec<usize>> {
     use rustix::{
         fd::BorrowedFd,
         fs::{FileType, fstat},
@@ -49,7 +49,7 @@ pub fn open() -> io::Result<Vec<usize>> {
 }
 
 #[cfg(windows)]
-pub fn open() -> io::Result<Vec<usize>> {
+pub fn open(include_stdio: bool) -> io::Result<Vec<usize>> {
     use windows_sys::Win32::{
         Foundation::{CompareObjectHandles, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
         Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
@@ -96,7 +96,7 @@ pub fn open() -> io::Result<Vec<usize>> {
             let is_stdio = stdio
                 .iter()
                 .any(|standard| CompareObjectHandles(entry.Handle, *standard) != 0);
-            if !is_stdio && GetFileType(entry.Handle) == FILE_TYPE_PIPE {
+            if (include_stdio || !is_stdio) && GetFileType(entry.Handle) == FILE_TYPE_PIPE {
                 pipes.push(entry.Handle as usize);
             }
         };
