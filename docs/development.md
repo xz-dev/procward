@@ -57,6 +57,15 @@ reference to Docker runners or the setup-qemu action. Nothing is built from them
 Review image-update PRs with the same architecture checks and full fixture CI as
 other changes; do not replace runtime execution with a build-only check.
 
+Image contents stayed unchanged during this move. Initial `.github/ci-images`
+checks discovered the manifests but GitHub rejected PR creation with
+`dependency_file_not_supported` / `invalid or unauthorized changes` (glob run
+`40656438537`, explicit-directories run `40657102372`). The bounded fallback moved
+manifests to `ci/images` and used four singular-directory entries. All four real
+checks then succeeded: Alpine native `40658230840`, Alpine riscv64 `40658231177`,
+binfmt `40658231943`, Debian riscv64 `40658233432`. Dependabot opened Alpine PRs
+#3 and #4 with no auto-merge request. No manual image-refresh process is required.
+
 ## Runtime fixtures
 
 Linux fixtures cover native argv/cwd/environment/stdio/status, rejected startup,

@@ -279,7 +279,9 @@ CI `40641026022` at `c79378b` passed all twelve rows on attempt 2 after an ordin
 unchanged-source GNU riscv64 rerun. Attempt 1's blocked-physical-output terminal
 fixture exceeded its 8-second fault bound and reported harness rescue. No
 assertion/deadline or product code was changed for that rerun; root cause is not
-established and remains a pre-tag review risk, not a claimed fix. The later
-`12eb25b` CI and dry run passed on attempt 1. Independent implementation review
+established and remains a pre-tag review risk, not a claimed fix. Image-refactor
+dry run `40656679344` also reproduced this blocked-output timeout on **native
+x86_64 musl**, reporting harness rescue; no emulator exception applies to that
+failure. The `12eb25b` checkpoint CI and dry run passed on attempt 1. Independent implementation review
 (task 5.5), owner prerequisites/release (section 6), later pi integration (section
 7) and full-system riscv64 coverage remain open.
