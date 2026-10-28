@@ -39,18 +39,113 @@ impl SavedTerminal {
         Ok(Self { physical, saved })
     }
     pub fn restore(&self) -> io::Result<()> {
-        // Kernel decides authority. No equality shortcut or TTIN/TTOU masking.
-        if let Err(error) = termios::tcsetattr(&self.physical, OptionalActions::Now, &self.saved) {
-            if termios::tcgetpgrp(&self.physical)? == process::getpgrp() {
-                return Err(error.into());
-            }
+        restore(&self.physical, &self.saved)
+    }
+}
+
+fn restore(physical: &OwnedFd, saved: &Termios) -> io::Result<()> {
+    // Kernel decides authority. No equality shortcut or TTIN/TTOU masking.
+    if let Err(error) = termios::tcsetattr(physical, OptionalActions::Now, saved) {
+        if termios::tcgetpgrp(physical)? == process::getpgrp() {
+            return Err(error.into());
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+pub fn restore_saved(saved: &Termios) -> io::Result<()> {
+    let physical = fs::open(
+        "/dev/tty",
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
+    restore(&physical, saved)
+}
+
+const MODE_LEN: usize = std::mem::size_of::<libc::tcflag_t>();
+pub const SNAPSHOT_RECORD_LEN: usize =
+    1 + 4 * MODE_LEN + 8 + 1 + std::mem::size_of::<termios::SpecialCodes>();
+
+fn snapshot_record(saved: &Termios) -> [u8; SNAPSHOT_RECORD_LEN] {
+    let mut bytes = [0; SNAPSHOT_RECORD_LEN];
+    bytes[0] = b'A';
+    for (chunk, mode) in bytes[1..1 + 4 * MODE_LEN].chunks_exact_mut(MODE_LEN).zip([
+        saved.input_modes.bits(),
+        saved.output_modes.bits(),
+        saved.control_modes.bits(),
+        saved.local_modes.bits(),
+    ]) {
+        chunk.copy_from_slice(&mode.to_ne_bytes());
+    }
+    let offset = 1 + 4 * MODE_LEN;
+    bytes[offset..offset + 4].copy_from_slice(&saved.input_speed().to_ne_bytes());
+    bytes[offset + 4..offset + 8].copy_from_slice(&saved.output_speed().to_ne_bytes());
+    #[cfg(target_os = "linux")]
+    {
+        bytes[offset + 8] = saved.line_discipline;
+    }
+    // SpecialCodes is repr(transparent) over a byte array, with no padding.
+    let codes = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(&saved.special_codes).cast::<u8>(),
+            std::mem::size_of::<termios::SpecialCodes>(),
+        )
+    };
+    bytes[offset + 9..].copy_from_slice(codes);
+    bytes
+}
+
+pub fn saved_from_record(bytes: &[u8]) -> io::Result<Termios> {
+    if bytes.len() != SNAPSHOT_RECORD_LEN || bytes[0] != b'A' {
+        return Err(io::Error::other("invalid terminal acquisition record"));
+    }
+    // Termios contains only integer fields and bitflags; zero is valid for each.
+    let mut saved: Termios = unsafe { std::mem::zeroed() };
+    let offset = 1 + 4 * MODE_LEN;
+    saved.set_input_speed(u32::from_ne_bytes(
+        bytes[offset..offset + 4].try_into().unwrap(),
+    ))?;
+    saved.set_output_speed(u32::from_ne_bytes(
+        bytes[offset + 4..offset + 8].try_into().unwrap(),
+    ))?;
+    let mut modes = bytes[1..offset]
+        .chunks_exact(MODE_LEN)
+        .map(|chunk| libc::tcflag_t::from_ne_bytes(chunk.try_into().unwrap()));
+    saved.input_modes = termios::InputModes::from_bits_retain(modes.next().unwrap());
+    saved.output_modes = termios::OutputModes::from_bits_retain(modes.next().unwrap());
+    saved.control_modes = termios::ControlModes::from_bits_retain(modes.next().unwrap());
+    saved.local_modes = termios::LocalModes::from_bits_retain(modes.next().unwrap());
+    #[cfg(target_os = "linux")]
+    {
+        saved.line_discipline = bytes[offset + 8];
+    }
+    // Same byte-array representation as snapshot_record; arbitrary control bytes are valid.
+    let codes = unsafe {
+        std::slice::from_raw_parts_mut(
+            std::ptr::from_mut(&mut saved.special_codes).cast::<u8>(),
+            std::mem::size_of::<termios::SpecialCodes>(),
+        )
+    };
+    codes.copy_from_slice(&bytes[offset + 9..]);
+    Ok(saved)
+}
+
+fn publish_terminal(fd: &OwnedFd, bytes: &[u8]) -> io::Result<bool> {
+    loop {
+        match rio::write(fd, bytes) {
+            Ok(count) if count == bytes.len() => return Ok(true),
+            Err(Errno::INTR) => continue,
+            Err(Errno::AGAIN) => return Ok(false),
+            Err(Errno::PIPE) => return Ok(true), // No surviving outer needs the record.
+            Ok(_) => return Err(io::Error::other("incomplete terminal state publication")),
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
 pub struct Terminal {
     state: SavedTerminal,
+    notice: OwnedFd,
     master: OwnedFd,
     user: Option<OwnedFd>,
     input: Vec<u8>,
@@ -64,7 +159,7 @@ pub struct Terminal {
     released: bool,
 }
 impl Terminal {
-    pub fn open() -> io::Result<Option<Self>> {
+    pub fn open(notice: &OwnedFd) -> io::Result<Option<Self>> {
         if !interactive()? {
             return Ok(None);
         }
@@ -74,6 +169,7 @@ impl Terminal {
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK)?;
         Ok(Some(Self {
             state,
+            notice: rio::fcntl_dupfd_cloexec(notice, 3)?,
             master: pty.controller,
             user: Some(pty.user),
             input: Vec::new(),
@@ -179,10 +275,15 @@ impl Terminal {
             return Ok(());
         }
         if !self.raw {
+            self.state.saved = termios::tcgetattr(&self.state.physical)?;
+            // Write-ahead acquisition intent: never leave raw mode without a survivor's snapshot.
+            if !publish_terminal(&self.notice, &snapshot_record(&self.state.saved))? {
+                return Ok(());
+            }
+            self.raw = true;
             let mut raw = self.state.saved.clone();
             raw.make_raw();
             termios::tcsetattr(&self.state.physical, OptionalActions::Now, &raw)?;
-            self.raw = true;
         }
         let size = termios::tcgetwinsize(&self.state.physical)?;
         if (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
@@ -261,8 +362,13 @@ impl Terminal {
     }
     pub fn restore(&mut self) -> io::Result<()> {
         if self.raw {
-            self.raw = false;
             self.state.restore()?;
+            // Restore (or relinquish after kernel denial) before clearing the obligation.
+            if publish_terminal(&self.notice, b"D")? {
+                self.raw = false;
+            } else {
+                return Err(io::Error::other("terminal release publication would block"));
+            }
         }
         Ok(())
     }
@@ -620,6 +726,21 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn acquisition_record_round_trips_all_terminal_settings() {
+        let pty = rustix_openpty::openpty(None, None).unwrap();
+        let mut saved = termios::tcgetattr(&pty.user).unwrap();
+        saved.local_modes ^= termios::LocalModes::ECHO;
+        saved.special_codes[termios::SpecialCodeIndex::VINTR] = 7;
+        saved.set_input_speed(9600).unwrap();
+        saved.set_output_speed(19200).unwrap();
+        let bytes = snapshot_record(&saved);
+        assert!(bytes.len() <= 512, "record must fit minimum POSIX PIPE_BUF");
+        let received = saved_from_record(&bytes).unwrap();
+        assert_eq!(format!("{received:?}"), format!("{saved:?}"));
+        assert!(saved_from_record(&bytes[..bytes.len() - 1]).is_err());
+    }
 
     #[test]
     fn background_read_after_foreground_reclaim_returns_to_cleanup() {

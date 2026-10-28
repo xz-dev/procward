@@ -83,7 +83,9 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
         );
         thread::sleep(Duration::from_millis(2));
     }
-    termios::tcsetpgrp(tty, pid).unwrap();
+    if !dir.join("never-raw").exists() {
+        termios::tcsetpgrp(tty, pid).unwrap();
+    }
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut sequence = 0;
     loop {
@@ -140,11 +142,20 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
         if let Ok(text) = fs::read_to_string(&action) {
             match text.as_str() {
                 "bg" => rp::kill_process_group(pid, Signal::CONT).unwrap(),
+                "continue-owner" => rp::kill_process(pid, Signal::CONT).unwrap(),
                 "fg" => {
                     termios::tcsetpgrp(tty, pid).unwrap();
                     rp::kill_process_group(pid, Signal::CONT).unwrap();
                 }
                 "reclaim" => termios::tcsetpgrp(tty, rp::getpgrp()).unwrap(),
+                "handoff" => termios::tcsetpgrp(tty, pid).unwrap(),
+                "stop-anchor" => {
+                    let anchor = fs::read_to_string(dir.join("anchor"))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    rp::kill_process(Pid::from_raw(anchor).unwrap(), Signal::STOP).unwrap();
+                }
                 "takeover" => {
                     termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
                     let mut state = observe_settings(tty);

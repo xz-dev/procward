@@ -38,9 +38,16 @@ pub(crate) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     }
 }
 
+const NOTICE_RECORD_LEN: usize = if crate::terminal::SNAPSHOT_RECORD_LEN > RECORD_LEN {
+    crate::terminal::SNAPSHOT_RECORD_LEN
+} else {
+    RECORD_LEN
+};
+
 struct PolicyReader {
-    bytes: [u8; RECORD_LEN],
+    bytes: [u8; NOTICE_RECORD_LEN],
     filled: usize,
+    terminal: Option<rustix::termios::Termios>,
     policy: Option<Policy>,
     progress: std::collections::HashSet<crate::policy::SignalIdentity>,
     pause: bool,
@@ -51,8 +58,9 @@ struct PolicyReader {
 impl PolicyReader {
     fn new() -> Self {
         Self {
-            bytes: [0; RECORD_LEN],
+            bytes: [0; NOTICE_RECORD_LEN],
             filled: 0,
+            terminal: None,
             policy: None,
             progress: std::collections::HashSet::new(),
             pause: false,
@@ -91,6 +99,10 @@ impl PolicyReader {
                         self.resumed = true;
                         continue;
                     }
+                    Ok(_) if byte[0] == b'D' => {
+                        self.terminal = None;
+                        continue;
+                    }
                     Ok(_) if byte[0] == b'X' => {
                         if self.result.is_some() {
                             return Err(io::Error::other("duplicate native primary result"));
@@ -104,21 +116,33 @@ impl PolicyReader {
                     }
                 }
             }
-            match rio::read(fd, &mut self.bytes[self.filled..]) {
+            let length = if self.bytes[0] == b'A' {
+                crate::terminal::SNAPSHOT_RECORD_LEN
+            } else {
+                RECORD_LEN
+            };
+            match rio::read(fd, &mut self.bytes[self.filled..length]) {
                 Ok(0) => return Err(io::Error::other("truncated native cleanup policy")),
                 Err(Errno::AGAIN) => return Ok(()),
                 Err(Errno::INTR) => continue,
                 Err(error) => return Err(error.into()),
                 Ok(count) => {
                     self.filled += count;
-                    if self.filled == RECORD_LEN {
-                        if &self.bytes[..4] == b"PWT1" {
-                            self.progress
-                                .insert(crate::policy::progress_record(&self.bytes)?);
+                    if self.filled == length {
+                        if self.bytes[0] == b'A' {
+                            self.terminal =
+                                Some(crate::terminal::saved_from_record(&self.bytes[..length])?);
+                        } else if &self.bytes[..4] == b"PWT1" {
+                            self.progress.insert(crate::policy::progress_record(
+                                self.bytes[..length].try_into().unwrap(),
+                            )?);
                         } else if self.policy.is_some() {
                             return Err(io::Error::other("duplicate native cleanup policy"));
                         } else {
-                            self.policy = Some(Policy::from_record(&self.bytes, config)?);
+                            self.policy = Some(Policy::from_record(
+                                self.bytes[..length].try_into().unwrap(),
+                                config,
+                            )?);
                         }
                         self.filled = 0;
                     }
@@ -146,13 +170,9 @@ pub fn run(
         signal_hook::consts::SIGTTIN,
         signal_hook::consts::SIGTTOU,
     ])?;
-    // Capture before the anchor can switch the physical terminal to raw mode.
-    let saved_terminal = if interactive {
+    if interactive {
         crate::terminal::interrupt_job_control()?;
-        Some(crate::terminal::SavedTerminal::open()?)
-    } else {
-        None
-    };
+    }
     let (read, write) = pipe()?;
     let (notice, publish) = pipe()?;
     let expected = process::getpid();
@@ -225,13 +245,14 @@ pub fn run(
                 task.primary(u32::from(result))?;
             }
             observed.progress().inherit(policy.progress);
+            let saved_terminal = policy.terminal;
             let policy = policy
                 .policy
                 .unwrap_or_else(|| Policy::new(config, status.signal().is_some()));
             let result = finish_anchor(status, &mut observed, policy);
             if status.signal().is_some() {
                 if let Some(saved) = &saved_terminal {
-                    saved.restore()?;
+                    crate::terminal::restore_saved(saved)?;
                 }
             }
             return result;

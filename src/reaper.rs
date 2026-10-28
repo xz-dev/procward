@@ -49,7 +49,7 @@ pub fn run_owned(
         if std::env::var_os("PROCWARD_PRIVATE_TASK").as_deref() == Some(OsStr::new("1")) {
             None
         } else {
-            crate::terminal::Terminal::open()?
+            crate::terminal::Terminal::open(notice)?
         };
     let mut signals = Signals::new([
         SIGCHLD,

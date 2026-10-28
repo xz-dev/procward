@@ -29,8 +29,8 @@ impl Terminal {
         let dir =
             std::env::temp_dir().join(format!("procward-terminal-{}-{label}", std::process::id()));
         stdfs::create_dir(&dir).unwrap();
-        if label == "redirect" {
-            stdfs::write(dir.join("redirect"), b"redirect").unwrap();
+        if ["redirect", "never-raw"].contains(&label) {
+            stdfs::write(dir.join(label), label).unwrap();
         }
         let pty = rustix_openpty::openpty(None, None).unwrap();
         if label == "blocked" {
@@ -493,4 +493,118 @@ fn anchor_loss_restores_raw_terminal_only_with_foreground_authority() {
             );
         }
     }
+}
+
+#[test]
+fn never_raw_anchor_loss_preserves_newer_shell_settings() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut terminal = Terminal::new("never-raw");
+    terminal.until("background private payload ready", |t| {
+        t.dir.join("ready").exists() && t.dir.join("worker").exists()
+    });
+    terminal.action("stop-anchor");
+    terminal.until("anchor stopped before foreground handoff", |t| {
+        stopped(&t.file("anchor"))
+    });
+    assert_eq!(
+        format!(
+            "{:?}",
+            rustix::termios::tcgetattr(&terminal.master).unwrap()
+        ),
+        terminal.file("saved-state"),
+        "background relay must never have made physical terminal raw"
+    );
+    terminal.action("takeover");
+    terminal.action("handoff");
+    terminal.action("kill-anchor");
+    terminal.until("owner completes never-raw failover", |t| {
+        t.dir.join("returned-state").exists()
+    });
+    assert_eq!(terminal.file("result"), "125");
+    assert_eq!(
+        terminal.file("returned-state"),
+        terminal.file("takeover"),
+        "never-raw failover must not restore stale startup settings"
+    );
+    terminal.until("owned identities gone", |t| {
+        ["primary", "worker", "keeper", "anchor"]
+            .iter()
+            .all(|name| absent(&t.file(name)))
+    });
+    assert!(terminal.finish_host().success());
+}
+
+#[test]
+fn reacquired_terminal_failover_restores_latest_shell_settings() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut terminal = Terminal::new("reacquire");
+    terminal.until("raw payload ready", |t| {
+        t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+    });
+    terminal.input(&[26]);
+    terminal.until("pause releases physical terminal", |t| {
+        t.dir.join("stopped").exists() && stopped(&t.file("worker"))
+    });
+    assert_eq!(terminal.file("stopped"), "true");
+    terminal.action("takeover");
+    terminal.action("fg");
+    terminal.input(b"p");
+    terminal.until("reacquired relay delivers input", |t| {
+        t.output.contains("REPLY 0")
+    });
+    terminal.action("kill-anchor");
+    terminal.until("owner completes reacquired failover", |t| {
+        t.dir.join("returned-state").exists()
+    });
+    assert_eq!(terminal.file("result"), "125");
+    assert_eq!(
+        terminal.file("returned-state"),
+        terminal.file("takeover"),
+        "reacquisition must save current settings, not reuse startup state"
+    );
+    terminal.until("owned identities gone", |t| {
+        ["primary", "worker", "keeper", "anchor"]
+            .iter()
+            .all(|name| absent(&t.file(name)))
+    });
+    assert!(terminal.finish_host().success());
+}
+
+#[test]
+fn released_terminal_anchor_loss_preserves_newer_shell_settings() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut terminal = Terminal::new("released");
+    terminal.until("raw payload ready", |t| {
+        t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+    });
+    terminal.input(&[26]);
+    terminal.until("pause releases physical terminal", |t| {
+        t.dir.join("stopped").exists() && stopped(&t.file("worker"))
+    });
+    assert_eq!(terminal.file("stopped"), "true");
+    terminal.action("takeover");
+    terminal.action("handoff");
+    terminal.action("continue-owner");
+    terminal.action("kill-anchor");
+    terminal.until("owner completes released-terminal failover", |t| {
+        t.dir.join("returned-state").exists()
+    });
+    assert_eq!(terminal.file("result"), "125");
+    assert_eq!(
+        terminal.file("returned-state"),
+        terminal.file("takeover"),
+        "released acquisition must not authorize a later stale restore"
+    );
+    terminal.until("owned identities gone", |t| {
+        ["primary", "worker", "keeper", "anchor"]
+            .iter()
+            .all(|name| absent(&t.file(name)))
+    });
+    assert!(terminal.finish_host().success());
 }
