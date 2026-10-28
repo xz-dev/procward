@@ -42,7 +42,7 @@ TERM/HUP, owner loss and terminal loss SHALL initiate irreversible cleanup even 
 - **THEN** SIGTTIN interrupts that read and native cleanup keeps progressing within its original bound
 
 ### Requirement: Restore terminal state only with authority
-On pause, normal exit and abnormal cleanup, surviving authorized native roles SHALL attempt saved terminal restoration. Kernel modifying calls SHALL decide authority; mode equality, signal masking or a private-session physical write SHALL NOT bypass a denial. No claim SHALL be made that a killed process can execute its own cleanup after SIGKILL.
+On pause, normal exit and abnormal cleanup, surviving authorized native roles SHALL attempt terminal restoration only while a physical-terminal acquisition still owes restoration, using the snapshot saved at that acquisition rather than startup state. Restore or release SHALL clear that obligation; reacquisition SHALL capture current settings. The acquisition snapshot and write-ahead restoration intent SHALL survive anchor loss before raw-mode entry. Kernel modifying calls SHALL decide authority; mode equality, signal masking or a private-session physical write SHALL NOT bypass a denial. No claim SHALL be made that a killed process can execute its own cleanup after SIGKILL.
 
 #### Scenario: Another job owns foreground
 - **WHEN** cleanup tries terminal restoration after foreground ownership changed
@@ -56,6 +56,18 @@ On pause, normal exit and abnormal cleanup, surviving authorized native roles SH
 - **WHEN** the anchor is killed while the shell-facing owner survives with foreground authority
 - **THEN** the surviving owner cleans the tree, attempts the saved physical-terminal restoration and returns failure 125
 - **AND** after unrelated foreground takeover, the same failover must not overwrite that job's state
+
+#### Scenario: Anchor dies without acquiring raw mode
+- **WHEN** procward starts in the background, its anchor is stopped before acquisition, the shell changes terminal settings, then foreground is handed to the outer and the anchor is killed
+- **THEN** the newer settings remain untouched and procward returns failure 125
+
+#### Scenario: Anchor dies after terminal release
+- **WHEN** pause has restored and released the terminal, the shell changes settings, foreground is handed to the outer without reacquisition, then the anchor is killed
+- **THEN** the released acquisition does not authorize restoration and the newer settings remain untouched with failure 125
+
+#### Scenario: Anchor dies after reacquiring the terminal
+- **WHEN** pause releases the terminal, the shell changes settings, procward reacquires raw mode on fg, then the anchor is killed
+- **THEN** authorized failover restores the settings captured on reacquisition, not startup settings, and returns failure 125
 
 ### Requirement: Preserve normal output and interrupt handling
 Normal completion SHALL deliver final output and preserve the primary result. Fatal cleanup SHALL interrupt tail waits and alone SHALL be allowed to discard pending output. Terminal Ctrl-C SHALL reach the command once, not be duplicated by forwarding. Native signal dispositions/masks SHALL NOT leak into payload exec.

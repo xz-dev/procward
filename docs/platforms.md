@@ -173,11 +173,24 @@ is the standard shell/login arrangement, not another reaper, watchdog or public
 mode. Native ownership/cleanup roles stay in the caller's session, outside the
 frozen workload; the private keeper is inside that workload and pauses with it.
 Noninteractive and per-task execution creates no PTY/session keeper.
-The outer captures physical termios before launching the anchor. On abnormal
-anchor exit it attempts saved restoration after cleanup, including cleanup
-failure, using the same unmasked kernel-authority check as the relay. An active
-raw-payload fault fixture requires status 125 and restored cooked settings; its
-unrelated-foreground variant requires the other job's settings to remain intact.
+Before each foreground raw-mode acquisition, the relay captures current physical
+termios and publishes that snapshot with an outstanding restoration obligation
+on the existing private pipe. The outer keeps no startup restoration snapshot.
+On signalled anchor exit it restores only an outstanding acquisition snapshot
+after cleanup, including cleanup failure, using the same unmasked
+kernel-authority check as the relay. Restore/release clears the obligation;
+later acquisition takes a fresh snapshot, including shell changes made during
+a pause. Never-raw and already-released failover leave newer shell settings
+untouched and still return status 125. Active raw-payload failover requires
+restored cooked settings; unrelated-foreground takeover must retain its state.
+
+Acquisition uses a write-ahead intent record immediately before the raw ioctl.
+A kill between publication and ioctl can therefore restore the just-captured
+foreground snapshot even though raw mode was not entered. This bounded window
+prefers a harmless restore of current acquisition state over missing recovery
+and leaving the terminal raw; it never authorizes use of startup state. A full
+pipe defers acquisition without changing the physical terminal. No mode-equality
+comparison substitutes for kernel authority.
 
 FreeBSD requires this retained session lifetime. Its
 [exit1 path](https://github.com/freebsd/freebsd-src/blob/releng/14.3/sys/kern/kern_exit.c)

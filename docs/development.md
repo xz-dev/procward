@@ -165,6 +165,45 @@ No assertion/deadline changed. Harness readiness alone is not proof that product
 inventory retained the identity; classify the next failure rather than treating
 an unchanged-source rerun as a fix.
 
+## Restoration-owed re-review fix-forward
+
+The re-review at `9f7d9ee` found that unconditional outer restoration could
+replace newer shell settings even when the relay never entered raw mode.
+Failover now uses only the outstanding acquisition-time snapshot from the
+private pipe. Restore/release clears it; foreground reacquisition saves current
+settings. See [platforms.md](platforms.md) for the bounded write-ahead intent
+window and unchanged kernel-authority checks.
+
+Evidence under `/var/tmp/pwg-restore-owed/` comes from task-owned
+`pwg-restore-owed` tmux, server PPID 1, outside the installed pi subreaper;
+`wakeup` was not touched. Before the fix, both new CLI regressions failed with
+status 125 but stale startup settings:
+
+```sh
+cargo build --locked --bins --examples
+cargo test --locked --test terminal never_raw_anchor_loss_preserves_newer_shell_settings -- --exact --nocapture
+cargo test --locked --test terminal reacquired_terminal_failover_restores_latest_shell_settings -- --exact --nocapture
+```
+
+`red-never_raw_anchor_loss_preserves_newer_shell_settings.log` and
+`red-reacquired_terminal_failover_restores_latest_shell_settings.log` retain
+those state-mismatch failures. The independent reviewer's probe was copied with
+only evidence/binary paths changed: `probe-red.log` reports
+`preserved_modified=False restored_stale_initial=True`; `probe-green.log`
+reports `preserved_modified=True restored_stale_initial=False`, status 125 in
+both. Ten additional fixed probe runs passed (`probe-green-01.log` through
+`probe-green-10.log`).
+
+`green-terminal.log` passes all twelve terminal tests, including existing
+active/raw recovery and unrelated-foreground denial, the never-raw and
+reacquisition regressions, and released-before-loss preservation. The small
+native-record codec test checks all saved settings, including baud and control
+codes (`codec-green.log`). Full applicable Linux suite passes 59 tests with no
+failures/ignored (`full-test.log`); 300 unchanged blocked-terminal iterations
+pass (`stress.log`). Build, clippy `-D warnings`, formatting, strict OpenSpec
+validation and release-safety regression checks pass. These local checks are
+not independent review approval or release authorization.
+
 ## Every-event CI and normal reruns
 
 Repository metadata was verified with
