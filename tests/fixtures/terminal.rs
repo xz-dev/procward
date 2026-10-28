@@ -209,6 +209,14 @@ pub fn child(dir: &Path) {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let worker_ready = Instant::now() + Duration::from_secs(20);
+    while !dir.join("worker").exists() {
+        assert!(
+            Instant::now() < worker_ready,
+            "detached worker startup deadline"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
     publish(dir.join("ready"), b"ready").unwrap();
     println!("TTY-READY");
     std::io::stdout().flush().unwrap();

@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+// BSD openpty sets CLOEXEC non-atomically; keep fixture process creation isolated.
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Terminal {
     dir: PathBuf,
     host: Child,
@@ -144,6 +147,9 @@ impl Drop for Terminal {
 
 #[test]
 fn interactive_primary_has_private_foreground_terminal_and_preserves_tail_and_status() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("isolation");
     terminal.until("primary terminal readiness", |t| {
         t.dir.join("terminal").exists()
@@ -186,6 +192,9 @@ fn interactive_primary_has_private_foreground_terminal_and_preserves_tail_and_st
 
 #[test]
 fn shell_reclaim_does_not_block_fatal_cleanup_or_kill_shell() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("reclaim");
     terminal.until("ready output", |t| t.output.contains("TTY-READY"));
     terminal.action("reclaim");
@@ -233,6 +242,9 @@ fn stopped(pid: &str) -> bool {
 
 #[test]
 fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont_race() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("job-control");
     terminal.until("primary and detached worker readiness", |t| {
         t.output.contains("TTY-READY") && t.dir.join("worker").exists()
@@ -284,6 +296,9 @@ fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont
 
 #[test]
 fn interactive_stderr_keeps_its_redirected_destination() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("redirect");
     terminal.until("ready output", |t| t.output.contains("TTY-READY"));
     terminal.input(b"q");
@@ -298,6 +313,9 @@ fn interactive_stderr_keeps_its_redirected_destination() {
 
 #[test]
 fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("tail");
     terminal.until("ready output", |t| t.output.contains("TTY-READY"));
     terminal.input(&[3]);
@@ -326,6 +344,9 @@ fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
 
 #[test]
 fn fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authority() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("blocked");
     terminal.until("ready output", |t| {
         t.output.contains("TTY-READY") && t.dir.join("worker").exists()
@@ -374,6 +395,9 @@ fn absent(pid: &str) -> bool {
 
 #[test]
 fn owner_loss_while_paused_cleans_work_without_foreground_rescue() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut terminal = Terminal::new("paused-loss");
     terminal.until("primary and worker ready", |t| {
         t.output.contains("TTY-READY") && t.dir.join("worker").exists()

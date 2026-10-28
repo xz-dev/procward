@@ -314,10 +314,10 @@ pub(crate) fn cleanup(
                 {
                     inventory.forget(pid);
                     if Some(pid) == primary {
-                        if result.is_some_and(|expected| expected != code as u8) {
-                            return Err(io::Error::other(
-                                "terminal keeper did not preserve primary result",
-                            ));
+                        if let Some(expected) = result.filter(|expected| *expected != code as u8) {
+                            return Err(io::Error::other(format!(
+                                "terminal keeper result mismatch: expected {expected}, got {code}, phase {phase:?}"
+                            )));
                         }
                         *result = Some(code as u8);
                     }
