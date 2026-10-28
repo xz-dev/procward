@@ -68,6 +68,8 @@ API source checks: [process-wrap std JobObject source](https://docs.rs/crate/pro
 
 Start with one Cargo binary, `src/main.rs` plus private modules. CLI integration tests do not require a public library. Add a library only if a concrete immediate caller/test needs it and doing so removes code; future remote pi-env adoption is not a reason. Use OsString argv and standard-library parsing; no shell-string mode or new configuration framework.
 
+**Panic policy (addendum-14):** release keeps `panic = "unwind"`. Abort is not enabled because no controller-panic fault seam proves cleanup safety. Follow-up: evaluate abort with a controller fault-injection seam; no release-profile change is part of section 4.
+
 Planned layout, created only during implementation:
 
 ```text
@@ -203,9 +205,11 @@ Use standard mechanisms rather than inventing replacements: [tini](https://githu
 
 ### 6. Small independently tested application contract; pi comes later
 
-Document a versioned direct-primary handoff: `PROCWARD_PROTOCOL=1`, immediate `PROCWARD_OWNER_PID` and an explicitly granted application-facing `PROCWARD_LIFECYCLE_FD`/Windows inherited-pipe equivalent. Native launch gates establish identity before exec; pi consumes a bounded ready record and rechecks live parent identity before skipping its own wrapper. Environment strings alone do not authorize managed state. Keep this app endpoint separate from native reaper/terminal grants and Job handles, exclude it/one-shot claims from ordinary descendants, and fail incomplete/stale/unsupported handoffs closed.
+Document a generic versioned managed-child handoff: `PROCWARD_PROTOCOL=1`, immediate `PROCWARD_OWNER_PID` and an explicitly granted application-facing `PROCWARD_LIFECYCLE_FD`/Windows inherited-pipe equivalent. Native launch gates establish identity before exec; any consuming application reads a bounded ready record and rechecks live parent identity before accepting managed state. Environment strings alone do not authorize managed state. Keep this app endpoint separate from native reaper/terminal grants and Job handles, exclude private endpoints/one-shot claims from ordinary descendants, and fail incomplete, stale, oversized or unsupported handoffs closed. No pi-specific procward mode exists.
 
-The same small stream supports readiness, owner-loss EOF and a pre-hook shutdown request. Per-task `run --control-fd N` uses non-session ownership and bounded startup/primary-result/error/cleanup records; retaining `S`/`X`/`E`/`C` semantics is an interface compatibility choice, not copied pi-env code. Success requires valid completion plus transport drain/helper close; Darwin completion is best-effort. Do not build the pi-env framed RPC or expose all native role internals. Version and exact bounds/fields are documented and fixture-tested before pi adopts them.
+The same small stream supports readiness, transport EOF and owner-loss/pre-hook shutdown notification to the primary. The primary's cooperative pre-kill window is bounded by the selected generic `--grace`, `--fatal-grace` and `--cleanup-deadline` policy; notification cannot extend or restart it. Standalone fixtures cover cooperative and blocked primaries, not-ready retry, silence timeout and deadline preemption. Procward imposes no fixed application hook or watchdog duration.
+
+Generic per-task `procward run --control-fd N` uses non-session ownership and bounded startup/primary-result/error/cleanup records; retaining `S`/`X`/`E`/`C` semantics is an interface compatibility choice, not copied pi-env code. Success requires valid completion plus transport drain/helper close; Darwin completion is best-effort. Do not build the pi-env framed RPC or expose all native role internals. Version and exact bounds/fields are documented and fixture-tested before any application adopts them.
 
 After standalone v0.1.0, make a normal pi change to bundle the release and adapt local session/task consumers (`process-owner.ts`, core exec/bash callers). A tiny entrypoint handles opt-outs/binary/handoff before heavy static imports; only managed or disabled inner execution imports the full CLI graph. Verify source/npm/compiled entrypoints with import-count instrumentation, not an arbitrary startup-percentage SLA. Preserve version-only fast path and `--no-process-ownership`/`PI_NO_PROCESS_OWNERSHIP=1`, with option-value/`--` handling. Direct `procward run -- pi` does not nest; arbitrary descendant discovery is outside v0.1.0.
 

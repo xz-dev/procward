@@ -86,3 +86,40 @@ Procward SHALL preserve primary exit status after successful cleanup, including 
 #### Scenario: Completion cannot be proved in time
 - **WHEN** cleanup reaches its deadline with a known survivor or missing required completion evidence
 - **THEN** procward returns cleanup failure, not a successful acknowledgement
+
+### Requirement: Expose a generic managed-child contract
+Procward SHALL expose a versioned managed-child environment and fd/handle handoff, without a pi-specific mode. Readiness SHALL require a bounded complete record and matching live immediate-parent identity; environment strings alone SHALL NOT prove managed state. Stale, incomplete, oversized and unsupported records SHALL fail closed. Application transports SHALL be distinct from native leases and Job handles; ordinary children SHALL inherit neither private ownership endpoints nor reusable direct-primary claims.
+
+#### Scenario: Direct primary accepts managed readiness
+- **WHEN** a standalone primary receives a complete supported ready record matching its live immediate parent and identity
+- **THEN** it can accept managed state without depending on pi
+
+#### Scenario: Invalid or truncated handoff
+- **WHEN** a record is stale, incomplete, oversized, unsupported or ends at transport EOF before readiness
+- **THEN** the consumer rejects managed state before application side effects
+
+#### Scenario: Primary launches an ordinary child
+- **WHEN** a managed primary starts a tool
+- **THEN** no private native lease or Job handle leaks and inherited metadata cannot authorize a reusable direct-primary claim
+
+### Requirement: Notify primary before bounded owner-loss termination
+Procward SHALL notify the primary of owner loss and allow cooperative shutdown within the already selected `--grace`, `--fatal-grace` and `--cleanup-deadline` policy. A blocked or unresponsive primary SHALL NOT prevent independent native cleanup at the configured deadline. Notification and retries SHALL NOT restart or extend that policy. Fixed application hook/watchdog durations SHALL remain application policy, not procward requirements.
+
+#### Scenario: Primary cooperates after owner loss
+- **WHEN** a standalone primary observes owner-loss notification and finishes within selected grace
+- **THEN** native cleanup permits that response while retaining the original deadline
+
+#### Scenario: Primary cannot respond
+- **WHEN** a standalone primary blocks after readiness and owner loss occurs
+- **THEN** independent cleanup terminates it within the configured deadline without waiting for an application hook
+
+#### Scenario: Response remains not ready or silent
+- **WHEN** interaction receives explicit not-ready replies or no reply
+- **THEN** retries remain response-driven and silence or endless hints fail at the original bounded deadline
+
+### Requirement: Expose generic per-task completion
+Per-task `procward run` SHALL report control, primary result and cleanup as distinct facts, support cancellation and preserve native status. Success SHALL require valid cleanup acknowledgement plus transport drain/close; primary exit alone SHALL NOT prove completion. Darwin completion SHALL explicitly mean best-effort cleanup.
+
+#### Scenario: Task result arrives before cleanup
+- **WHEN** a task reports a primary result but closes transport without required cleanup acknowledgement
+- **THEN** its consumer reports unconfirmed cleanup instead of task success
