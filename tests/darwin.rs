@@ -14,11 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn poll(deadline: Instant, mut predicate: impl FnMut() -> bool) {
+fn poll(deadline: Instant, phase: &str, mut predicate: impl FnMut() -> bool) {
     while !predicate() {
         assert!(
             Instant::now() < deadline,
-            "Darwin observation deadline expired"
+            "Darwin observation deadline expired: phase={phase}"
         );
         thread::sleep(Duration::from_millis(5));
     }
@@ -93,10 +93,14 @@ impl Run {
         };
         for mode in ["tree", "branch", "worker"] {
             let path = run.dir.join(format!("{mode}.pid"));
-            poll(Instant::now() + Duration::from_secs(20), || {
-                path.try_exists().unwrap()
-                    && fs::read_to_string(&path).unwrap().parse::<u32>().is_ok()
-            });
+            poll(
+                Instant::now() + Duration::from_secs(20),
+                &format!("{mode} PID-file readiness"),
+                || {
+                    path.try_exists().unwrap()
+                        && fs::read_to_string(&path).unwrap().parse::<u32>().is_ok()
+                },
+            );
             run.observed.push(
                 facts(fs::read_to_string(path).unwrap().parse().unwrap())
                     .unwrap()
@@ -108,10 +112,52 @@ impl Run {
         run
     }
     fn finish(&mut self) -> std::process::ExitStatus {
-        poll(Instant::now() + Duration::from_secs(8), || {
-            self.child.try_wait().unwrap().is_some()
-        });
+        poll(
+            Instant::now() + Duration::from_secs(8),
+            "shell-facing owner completion",
+            || self.child.try_wait().unwrap().is_some(),
+        );
         self.child.wait().unwrap()
+    }
+    fn diagnostics(&self) {
+        eprintln!(
+            "Darwin failure facts: dir={:?}; harness PID-file readiness is NOT product inventory retention; stderr={:?}",
+            self.dir,
+            fs::read_to_string(self.dir.join("stderr.log"))
+        );
+        for expected in &self.observed {
+            let current = facts(expected.pbi_pid).map(|info| {
+                info.map(|info| {
+                    (
+                        info.pbi_pid,
+                        info.pbi_ppid,
+                        info.pbi_start_tvsec,
+                        info.pbi_start_tvusec,
+                        info.pbi_stat,
+                        info.pbi_uid,
+                        info.pbi_ruid,
+                        info.pbi_svuid,
+                    )
+                })
+            });
+            eprintln!(
+                "identity expected pid={} ppid={} birth={}.{} state={} uid={}/{}/{}; current={current:?}",
+                expected.pbi_pid,
+                expected.pbi_ppid,
+                expected.pbi_start_tvsec,
+                expected.pbi_start_tvusec,
+                expected.pbi_stat,
+                expected.pbi_uid,
+                expected.pbi_ruid,
+                expected.pbi_svuid
+            );
+        }
+        for mode in ["tree", "branch", "worker"] {
+            eprintln!(
+                "readiness {mode}.pid={:?}",
+                fs::read_to_string(self.dir.join(format!("{mode}.pid")))
+            );
+        }
     }
     fn gone(&self) -> bool {
         self.observed.iter().all(|info| match facts(info.pbi_pid) {
@@ -124,6 +170,9 @@ impl Run {
 }
 impl Drop for Run {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.diagnostics();
+        }
         let mut rescued = false;
         for info in &self.observed {
             let current = match facts(info.pbi_pid) {
@@ -139,7 +188,11 @@ impl Drop for Run {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
-        poll(Instant::now() + Duration::from_secs(3), || self.gone());
+        poll(
+            Instant::now() + Duration::from_secs(3),
+            "harness rescue absence",
+            || self.gone(),
+        );
         fs::remove_dir_all(&self.dir).unwrap();
         if self.expected_preobservation_cleanup {
             eprintln!(
@@ -160,7 +213,11 @@ fn darwin_best_effort_tree_owner_loss_and_observer_loss() {
         let mut run = Run::start(0);
         run.child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
         assert_eq!(run.finish().code(), Some(23));
-        poll(Instant::now() + Duration::from_secs(1), || run.gone());
+        poll(
+            Instant::now() + Duration::from_secs(1),
+            "normal-exit retained identity absence",
+            || run.gone(),
+        );
     }
     {
         let mut run = Run::start(1);
@@ -171,7 +228,11 @@ fn darwin_best_effort_tree_owner_loss_and_observer_loss() {
         let fault = Instant::now();
         run.child.kill().unwrap();
         assert!(!run.finish().success());
-        poll(fault + Duration::from_secs(8), || run.gone());
+        poll(
+            fault + Duration::from_secs(8),
+            "owner-loss retained identity absence",
+            || run.gone(),
+        );
     }
     {
         let mut run = Run::start(2);
