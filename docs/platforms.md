@@ -192,6 +192,12 @@ and leaving the terminal raw; it never authorizes use of startup state. A full
 pipe defers acquisition without changing the physical terminal. No mode-equality
 comparison substitutes for kernel authority.
 
+The restoration record travels only on an anonymous, close-on-exec private pipe
+that no keeper, payload or ordinary child inherits. procward is not a sandbox:
+another process running as the same user can still reach the pipe through
+`/proc/<pid>/fd` or `ptrace`. That is outside the threat model, as it is for the
+native policy transport (see [contract](contract.md)).
+
 FreeBSD requires this retained session lifetime. Its
 [exit1 path](https://github.com/freebsd/freebsd-src/blob/releng/14.3/sys/kern/kern_exit.c)
 notes that killjobc revokes a session leader's controlling tty. The
