@@ -200,8 +200,17 @@ impl Terminal {
     }
     pub fn drain(&mut self) -> io::Result<()> {
         if self.foreground()? {
-            self.eof |= read_buffer(&self.master, &mut self.output, true)?;
-            write_buffer(&self.physical, &mut self.output)?;
+            // Batch up to 64 KiB per turn without starving ownership/signal checks.
+            let mut emitted = 0;
+            for _ in 0..16 {
+                let (eof, read) = read_buffer(&self.master, &mut self.output, true)?;
+                self.eof |= eof;
+                let written = write_buffer(&self.physical, &mut self.output)?;
+                emitted += written;
+                if (read == 0 && written == 0) || emitted >= 65536 {
+                    break;
+                }
+            }
         }
         Ok(())
     }
@@ -230,34 +239,36 @@ impl Drop for Terminal {
         let _ = self.restore();
     }
 }
-fn read_buffer(fd: &OwnedFd, target: &mut Vec<u8>, pty: bool) -> io::Result<bool> {
+fn read_buffer(fd: &OwnedFd, target: &mut Vec<u8>, pty: bool) -> io::Result<(bool, usize)> {
     if target.len() >= 65536 {
-        return Ok(false);
+        return Ok((false, 0));
     }
     let mut bytes = [0; 4096];
-    match rio::read(fd, &mut bytes) {
-        Ok(0) if pty => Ok(true),
+    let size = bytes.len().min(65536 - target.len());
+    match rio::read(fd, &mut bytes[..size]) {
+        Ok(0) if pty => Ok((true, 0)),
         Ok(0) => Err(io::Error::other("terminal input ended")),
         Ok(count) => {
             target.extend_from_slice(&bytes[..count]);
-            Ok(false)
+            Ok((false, count))
         }
-        Err(Errno::IO) if pty => Ok(true),
-        Err(Errno::AGAIN | Errno::INTR) => Ok(false),
+        Err(Errno::IO) if pty => Ok((true, 0)),
+        Err(Errno::AGAIN | Errno::INTR) => Ok((false, 0)),
         Err(error) => Err(error.into()),
     }
 }
-fn write_buffer(fd: &OwnedFd, source: &mut Vec<u8>) -> io::Result<()> {
+fn write_buffer(fd: &OwnedFd, source: &mut Vec<u8>) -> io::Result<usize> {
     if !source.is_empty() {
         match rio::write(fd, source) {
             Ok(count) => {
                 source.drain(..count);
+                return Ok(count);
             }
             Err(Errno::AGAIN | Errno::INTR) => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 pub fn exec(args: &[OsString]) -> io::Result<u8> {
