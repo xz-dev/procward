@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: BSD-3-Clause
+use rustix::{
+    fd::{BorrowedFd, FromRawFd, OwnedFd},
+    io::{self as rio},
+    process::{self as rp, Pid, Signal, WaitOptions},
+    termios,
+};
+use std::{
+    env, fs,
+    io::Write,
+    os::unix::process::CommandExt,
+    path::Path,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
+
+pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
+    let fd = fd.to_str().unwrap().parse::<i32>().unwrap();
+    rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
+    let tty = unsafe { BorrowedFd::borrow_raw(0) };
+    let saved = termios::tcgetattr(tty).unwrap();
+    let mut child = Command::new(binary);
+    child
+        .args([
+            "run",
+            "--grace",
+            "500ms",
+            "--fatal-grace",
+            "250ms",
+            "--cleanup-deadline",
+            "1500ms",
+            "--",
+        ])
+        .arg(env::current_exe().unwrap())
+        .arg("terminal-child")
+        .arg(dir)
+        .process_group(0);
+    if dir.join("redirect").exists() {
+        child.stderr(fs::File::create(dir.join("stderr")).unwrap());
+    }
+    #[expect(
+        clippy::zombie_processes,
+        reason = "waitpid below consumes both stopped and terminal child statuses"
+    )]
+    let child = child.spawn().unwrap();
+    let pid = Pid::from_raw(child.id() as i32).unwrap();
+    fs::write(dir.join("owner"), child.id().to_string()).unwrap();
+    // TTOU denial must not be hidden in production; shell fixture uses its normal shell policy.
+    unsafe {
+        libc::signal(signal_hook::consts::SIGTTOU, libc::SIG_IGN);
+    }
+    termios::tcsetpgrp(tty, pid).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut sequence = 0;
+    loop {
+        if let Some((_, status)) =
+            rp::waitpid(Some(pid), WaitOptions::NOHANG | WaitOptions::UNTRACED).unwrap()
+        {
+            if status.stopped() {
+                termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
+                fs::write(
+                    dir.join("stopped"),
+                    format!(
+                        "{}",
+                        format!("{:?}", termios::tcgetattr(tty).unwrap()) == format!("{saved:?}")
+                    ),
+                )
+                .unwrap();
+            } else if let Some(code) = status
+                .exit_status()
+                .or_else(|| status.terminating_signal().map(|s| 128 + s))
+            {
+                termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
+                fs::write(dir.join("result"), code.to_string()).unwrap();
+                fs::write(
+                    dir.join("restored"),
+                    format!(
+                        "{}",
+                        format!("{:?}", termios::tcgetattr(tty).unwrap()) == format!("{saved:?}")
+                    ),
+                )
+                .unwrap();
+                return;
+            }
+        }
+        let action = dir.join(format!("action-{sequence}"));
+        if let Ok(text) = fs::read_to_string(&action) {
+            match text.as_str() {
+                "bg" => rp::kill_process_group(pid, Signal::CONT).unwrap(),
+                "fg" => {
+                    termios::tcsetpgrp(tty, pid).unwrap();
+                    rp::kill_process_group(pid, Signal::CONT).unwrap();
+                }
+                "reclaim" => termios::tcsetpgrp(tty, rp::getpgrp()).unwrap(),
+                "term" => rp::kill_process(pid, Signal::TERM).unwrap(),
+                "kill" => rp::kill_process(pid, Signal::KILL).unwrap(),
+                _ => panic!("unknown terminal action"),
+            }
+            fs::write(dir.join(format!("acted-{sequence}")), b"done").unwrap();
+            sequence += 1;
+        }
+        assert!(Instant::now() < deadline, "terminal host deadline");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+pub fn child(dir: &Path) {
+    let stdin = unsafe { BorrowedFd::borrow_raw(0) };
+    let group = rp::getpgrp();
+    let tty = rustix::fs::open(
+        "/dev/tty",
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    let terminal = termios::tcgetpgrp(&tty).unwrap();
+    fs::write(dir.join("primary"), std::process::id().to_string()).unwrap();
+    fs::write(
+        dir.join("terminal"),
+        format!(
+            "{} {} {}",
+            group,
+            terminal,
+            termios::tcgetsid(&tty).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut state = termios::tcgetattr(stdin).unwrap();
+    state.make_raw();
+    termios::tcsetattr(stdin, termios::OptionalActions::Now, &state).unwrap();
+    let interrupts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = interrupts.clone();
+    unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .unwrap();
+    }
+    fs::write(dir.join("ready"), b"ready").unwrap();
+    println!("TTY-READY");
+    std::io::stdout().flush().unwrap();
+    let mut byte = [0];
+    loop {
+        match rio::read(stdin, &mut byte) {
+            Ok(1) => match byte[0] {
+                b'q' => {
+                    println!("FINAL-TAIL");
+                    eprintln!("REDIRECTED-TAIL");
+                    std::process::exit(23);
+                }
+                b'p' => {
+                    println!(
+                        "REPLY {}",
+                        interrupts.load(std::sync::atomic::Ordering::SeqCst)
+                    );
+                    std::io::stdout().flush().unwrap();
+                }
+                3 => {
+                    rp::kill_process(rp::getpid(), Signal::INT).unwrap();
+                }
+                26 => {
+                    rp::kill_process(rp::getpid(), Signal::TSTP).unwrap();
+                }
+                _ => {}
+            },
+            Err(rustix::io::Errno::INTR) => {}
+            other => panic!("terminal input: {other:?}"),
+        }
+    }
+}

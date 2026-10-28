@@ -16,6 +16,8 @@ mod owner;
 mod policy;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 mod reaper;
+#[cfg(unix)]
+mod terminal;
 #[cfg(windows)]
 mod windows;
 
@@ -46,6 +48,10 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         [role, rest @ ..] if role == "__anchor" => owner::anchor(rest)
+            .map(u32::from)
+            .map_err(|error| (125, error.to_string())),
+        #[cfg(unix)]
+        [role, rest @ ..] if role == "__terminal" => terminal::exec(rest)
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),
         [run, options @ ..] if run == "run" => {

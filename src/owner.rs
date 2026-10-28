@@ -82,7 +82,15 @@ impl PolicyReader {
 
 pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8> {
     crate::reaper::acquire()?;
-    let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
+    let interactive = crate::terminal::interactive()?;
+    let mut signals = Signals::new([
+        SIGCHLD,
+        SIGHUP,
+        SIGINT,
+        SIGTERM,
+        signal_hook::consts::SIGTSTP,
+        signal_hook::consts::SIGCONT,
+    ])?;
     let (read, write) = pipe()?;
     let (notice, publish) = pipe()?;
     let expected = process::getpid();
@@ -98,8 +106,10 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
         .arg(config.fatal_grace.as_millis().to_string())
         .arg(config.deadline.as_millis().to_string())
         .arg(command)
-        .args(args)
-        .process_group(0);
+        .args(args);
+    if !interactive {
+        anchor.process_group(0);
+    }
     // Only async-signal-safe OS calls run between fork and trusted native exec.
     unsafe {
         anchor.pre_exec(move || {
@@ -133,7 +143,13 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
             let mut observed = Inventory::new();
             return finish_anchor(status, &mut observed, policy);
         }
-        for signal in signals.pending().filter(|signal| *signal != SIGCHLD) {
+        for signal in signals
+            .pending()
+            .filter(|signal| *signal != SIGCHLD && *signal != signal_hook::consts::SIGTSTP)
+        {
+            if interactive && signal == SIGINT {
+                continue;
+            }
             process::kill_process(pid, Signal::from_named_raw(signal).unwrap())?;
         }
         thread::sleep(Duration::from_millis(5));

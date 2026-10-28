@@ -10,12 +10,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+mod terminal;
 #[cfg(windows)]
 mod windows;
 
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        #[cfg(unix)]
+        "terminal-host" => terminal::host(&args[2], &args[3], Path::new(&args[4])),
+        #[cfg(unix)]
+        "terminal-child" => terminal::child(Path::new(&args[2])),
         #[cfg(windows)]
         "conpty-bootstrap" => windows::conpty_bootstrap(&args[2]),
         #[cfg(windows)]

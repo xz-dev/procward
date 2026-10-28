@@ -45,25 +45,42 @@ pub fn run_owned(
     config: Config,
 ) -> io::Result<u8> {
     acquire()?;
-    let mut signals = Signals::new([SIGCHLD, SIGHUP, SIGINT, SIGTERM])?;
+    let mut terminal = crate::terminal::Terminal::open()?;
+    let mut signals = Signals::new([
+        SIGCHLD,
+        SIGHUP,
+        SIGINT,
+        SIGTERM,
+        signal_hook::consts::SIGTTIN,
+        signal_hook::consts::SIGTTOU,
+    ])?;
     children()?;
-    let mut command = Command::new(command);
-    command.args(args);
+    let mut payload = Command::new(command);
+    payload.args(args);
     if !crate::owner::alive(lease)? {
         return Err(io::Error::other(
             "owner lost before payload launch permission",
         ));
     }
     // No pre_exec on the untrusted command: libc execvp adds an ENOEXEC shell fallback.
-    let child = CommandWrap::from(command)
-        .wrap(ProcessGroup::leader())
-        .spawn()?;
+    let child = if let Some(terminal) = &mut terminal {
+        let child = CommandWrap::from(terminal.command(command, args)?).spawn()?;
+        terminal.launched();
+        child
+    } else {
+        CommandWrap::from(payload)
+            .wrap(ProcessGroup::leader())
+            .spawn()?
+    };
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
     let mut inventory = Inventory::new();
     let mut result = None;
     let mut requested = None;
     let observed = (|| -> io::Result<()> {
         loop {
+            if let Some(terminal) = &mut terminal {
+                terminal.pump()?;
+            }
             inventory.refresh()?;
             if !crate::owner::alive(lease)? {
                 return Err(io::Error::other("owner lease ended"));
@@ -98,7 +115,10 @@ pub fn run_owned(
             }
             reap_adopted(primary, &mut inventory)?;
             // Fatal requests select one immutable policy now, even if primary ignores TERM.
-            if let Some(signal) = signals.pending().find(|signal| *signal != SIGCHLD) {
+            if let Some(signal) = signals
+                .pending()
+                .find(|signal| matches!(*signal, SIGHUP | SIGINT | SIGTERM))
+            {
                 requested = Some(signal);
                 return Ok(());
             }
@@ -111,7 +131,24 @@ pub fn run_owned(
         Some(signal) => child.signal(signal),
         None => Ok(()),
     };
+    let fatal = observed.is_err() || requested.is_some();
     cleanup(&mut inventory, Some(primary), &mut result, policy)?;
+    if let Some(terminal) = &mut terminal {
+        if !fatal {
+            while !terminal.drained() {
+                if !crate::owner::alive(lease)?
+                    || signals
+                        .pending()
+                        .any(|s| matches!(s, SIGHUP | SIGINT | SIGTERM))
+                {
+                    break;
+                }
+                terminal.pump()?;
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        terminal.restore()?;
+    }
     published?;
     forwarded?;
     observed?;
