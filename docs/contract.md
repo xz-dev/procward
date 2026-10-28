@@ -106,3 +106,46 @@ cleanup retains the documented best-effort/pre-observation limitation.
 removal, parent/primary/launch identity mismatches, unsupported versions,
 truncation, oversized records and EOF before readiness. Applications, including
 pi's later adapter, implement the same documented boundary independently.
+
+## Per-task control, result and cleanup
+
+Use `procward run --control-fd N -- <command>` on Unix, or
+`--control-handle N` on Windows. The endpoint is an inherited duplex Unix-domain
+stream socket or Windows byte-mode duplex named pipe, respectively. It must be
+valid before launch; procward takes ownership and makes it non-inheritable.
+Task mode creates no new session/private PTY, even if inherited stdio is a tty.
+The primary's application lifecycle pipe remains separate from task control.
+
+The controller sends at most one bounded request:
+
+```text
+PROCWARD/1 CANCEL\n
+```
+
+EOF also cancels; an incomplete, oversized or invalid request fails control and
+initiates cleanup. The controller receives LF-terminated records, each bounded
+to 256 bytes:
+
+```text
+PROCWARD/1 S <owner_pid> <scope>\n
+PROCWARD/1 X <native_primary_result>\n
+PROCWARD/1 C <scope>\n
+```
+
+`S` means the control endpoint was accepted and native initialization is
+starting, **not** that application readiness was reached. `X` is the primary's
+result, not tree completion: owned descendants can still be shutting down.
+Results are decimal Unix exit/signal-derived status or full native Windows u32.
+`scope` is `kernel` on Linux/FreeBSD/Windows and `best-effort` on Darwin. A
+startup/control/cleanup failure produces `PROCWARD/1 E 125\n` instead of C.
+Cancellation before a primary exists can therefore produce E rather than X/C.
+
+Success requires S, a valid X, C with the expected scope **and transport EOF**.
+Missing C, an error record, truncation, invalid ordering or a transport that does
+not drain/close is unconfirmed cleanup, even if X was zero. Native leases, the
+policy publication channel and Windows Job handles never travel on task control
+or into ordinary children. A blocked controller cannot hold up native cleanup;
+record buffering is bounded, and the final transport flush has a configured
+cleanup-deadline bound. Darwin C confirms a best-effort sweep, not containment.
+EOF following C is required evidence that the owning helper closed its endpoint.
+EOF on the separate application pipe is owner loss, not this task completion.
