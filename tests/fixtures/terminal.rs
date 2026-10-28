@@ -45,7 +45,7 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     )]
     let child = child.spawn().unwrap();
     let pid = Pid::from_raw(child.id() as i32).unwrap();
-    fs::write(dir.join("owner"), child.id().to_string()).unwrap();
+    publish(dir.join("owner"), child.id().to_string()).unwrap();
     // TTOU denial must not be hidden in production; shell fixture uses its normal shell policy.
     unsafe {
         libc::signal(signal_hook::consts::SIGTTOU, libc::SIG_IGN);
@@ -59,7 +59,7 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
         {
             if status.stopped() {
                 termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
-                fs::write(
+                publish(
                     dir.join("stopped"),
                     format!(
                         "{}",
@@ -72,8 +72,8 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                 .or_else(|| status.terminating_signal().map(|s| 128 + s))
             {
                 termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
-                fs::write(dir.join("result"), code.to_string()).unwrap();
-                fs::write(
+                publish(dir.join("result"), code.to_string()).unwrap();
+                publish(
                     dir.join("restored"),
                     format!(
                         "{}",
@@ -93,11 +93,18 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                     rp::kill_process_group(pid, Signal::CONT).unwrap();
                 }
                 "reclaim" => termios::tcsetpgrp(tty, rp::getpgrp()).unwrap(),
+                "race" => {
+                    let worker = fs::read_to_string(dir.join("worker"))
+                        .unwrap()
+                        .parse::<i32>()
+                        .unwrap();
+                    rp::kill_process(Pid::from_raw(worker).unwrap(), Signal::CONT).unwrap();
+                }
                 "term" => rp::kill_process(pid, Signal::TERM).unwrap(),
                 "kill" => rp::kill_process(pid, Signal::KILL).unwrap(),
                 _ => panic!("unknown terminal action"),
             }
-            fs::write(dir.join(format!("acted-{sequence}")), b"done").unwrap();
+            publish(dir.join(format!("acted-{sequence}")), b"done").unwrap();
             sequence += 1;
         }
         assert!(Instant::now() < deadline, "terminal host deadline");
@@ -115,8 +122,8 @@ pub fn child(dir: &Path) {
     )
     .unwrap();
     let terminal = termios::tcgetpgrp(&tty).unwrap();
-    fs::write(dir.join("primary"), std::process::id().to_string()).unwrap();
-    fs::write(
+    publish(dir.join("primary"), std::process::id().to_string()).unwrap();
+    publish(
         dir.join("terminal"),
         format!(
             "{} {} {}",
@@ -137,7 +144,19 @@ pub fn child(dir: &Path) {
         })
         .unwrap();
     }
-    fs::write(dir.join("ready"), b"ready").unwrap();
+    #[expect(
+        clippy::zombie_processes,
+        reason = "fixture leaves detached descendant for procward cleanup"
+    )]
+    let _worker = Command::new(env::current_exe().unwrap())
+        .arg("terminal-worker")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    publish(dir.join("ready"), b"ready").unwrap();
     println!("TTY-READY");
     std::io::stdout().flush().unwrap();
     let mut byte = [0];
@@ -168,4 +187,24 @@ pub fn child(dir: &Path) {
             other => panic!("terminal input: {other:?}"),
         }
     }
+}
+
+pub fn worker(dir: &Path) {
+    rp::setsid().unwrap();
+    publish(dir.join("worker"), std::process::id().to_string()).unwrap();
+    let mut sequence = 0;
+    loop {
+        if dir.join(format!("ping-{sequence}")).exists() {
+            publish(dir.join(format!("pong-{sequence}")), b"alive").unwrap();
+            sequence += 1;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn publish(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
 }

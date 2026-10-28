@@ -58,6 +58,17 @@ impl Inventory {
         Ok(())
     }
 
+    pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
+        let signal = if paused { Signal::STOP } else { Signal::CONT };
+        let result = process::reaper_kill(None, signal, false, None)?;
+        if let Some(pid) = result.first_failed {
+            return Err(io::Error::other(format!(
+                "FreeBSD reaper failed to signal {pid}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn forget(&mut self, pid: Pid) {
         self.0.remove(&pid);
     }

@@ -33,6 +33,7 @@ pub struct Terminal {
     output: Vec<u8>,
     eof: bool,
     raw: bool,
+    pause: bool,
 }
 impl Terminal {
     pub fn open() -> io::Result<Option<Self>> {
@@ -57,6 +58,7 @@ impl Terminal {
             output: Vec::new(),
             eof: false,
             raw: false,
+            pause: false,
         }))
     }
     pub fn command(&mut self, command: &OsStr, args: &[OsString]) -> io::Result<Command> {
@@ -105,10 +107,19 @@ impl Terminal {
         }
         termios::tcsetwinsize(&self.master, termios::tcgetwinsize(&self.physical)?)?;
         read_buffer(&self.physical, &mut self.input, false)?;
+        let suspend = self.saved.special_codes[termios::SpecialCodeIndex::VSUSP];
+        if suspend != 0 && self.input.contains(&suspend) {
+            self.input.retain(|byte| *byte != suspend);
+            self.pause = true;
+            return Ok(());
+        }
         write_buffer(&self.master, &mut self.input)?;
         self.eof |= read_buffer(&self.master, &mut self.output, true)?;
         write_buffer(&self.physical, &mut self.output)?;
         Ok(())
+    }
+    pub fn pause_requested(&mut self) -> bool {
+        std::mem::take(&mut self.pause)
     }
     pub fn drained(&self) -> bool {
         self.eof && self.output.is_empty()

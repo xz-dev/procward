@@ -6,7 +6,7 @@ use rustix::{
 };
 use std::{collections::HashMap, fs, io};
 
-pub struct Inventory(HashMap<Pid, Target>);
+pub struct Inventory(HashMap<Pid, Target>, HashMap<Pid, (OwnedFd, u64)>);
 
 struct Target {
     fd: Option<OwnedFd>,
@@ -15,7 +15,7 @@ struct Target {
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self(HashMap::new(), HashMap::new())
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
@@ -47,8 +47,103 @@ impl Inventory {
         Ok(())
     }
 
+    pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
+        let root = process::getpid();
+        let mut pending: Vec<_> = self.1.keys().copied().chain([root]).collect();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent) = pending.pop() {
+            if !visited.insert(parent) {
+                continue;
+            }
+            let Some(before) = birth(parent)? else {
+                continue;
+            };
+            if parent != root
+                && self
+                    .1
+                    .get(&parent)
+                    .is_none_or(|(_, expected)| *expected != before)
+            {
+                continue;
+            }
+            let tasks = match fs::read_dir(format!("/proc/{parent}/task")) {
+                Ok(tasks) => tasks,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let mut observed = Vec::new();
+            for task in tasks {
+                let text = match fs::read_to_string(task?.path().join("children")) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                for raw in text.split_whitespace() {
+                    let pid = raw
+                        .parse()
+                        .ok()
+                        .and_then(Pid::from_raw)
+                        .ok_or_else(|| io::Error::other("invalid descendant PID"))?;
+                    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                        Ok(text) => text,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    };
+                    let actual_parent = stat
+                        .rsplit_once(')')
+                        .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                        .and_then(|v| v.parse::<i32>().ok())
+                        .and_then(Pid::from_raw);
+                    if actual_parent != Some(parent) {
+                        continue;
+                    }
+                    let observed_birth = parse_birth(&stat)?;
+                    if let Some(fd) = open_identity(pid)? {
+                        if birth(pid)? == Some(observed_birth) {
+                            observed.push((pid, fd, observed_birth));
+                        }
+                    }
+                }
+            }
+            // A stable handle plus live birth checks bind each edge to the observed parent.
+            if birth(parent)? != Some(before) {
+                continue;
+            }
+            for (pid, fd, identity) in observed {
+                self.1.insert(pid, (fd, identity));
+                pending.push(pid);
+            }
+        }
+        let signal = if paused {
+            process::Signal::STOP
+        } else {
+            process::Signal::CONT
+        };
+        let mut gone = Vec::new();
+        for (pid, (fd, _)) in &self.1 {
+            match process::pidfd_send_signal(fd, signal) {
+                Ok(()) => {}
+                Err(Errno::SRCH) => gone.push(*pid),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for pid in gone {
+            self.1.remove(&pid);
+        }
+        for (pid, target) in &self.0 {
+            if target.fd.is_none() {
+                match process::kill_process(*pid, signal) {
+                    Ok(()) | Err(Errno::SRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn forget(&mut self, pid: Pid) {
         self.0.remove(&pid);
+        self.1.remove(&pid);
     }
 }
 

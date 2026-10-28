@@ -53,6 +53,8 @@ pub fn run_owned(
         SIGTERM,
         signal_hook::consts::SIGTTIN,
         signal_hook::consts::SIGTTOU,
+        signal_hook::consts::SIGTSTP,
+        signal_hook::consts::SIGCONT,
     ])?;
     children()?;
     let mut payload = Command::new(command);
@@ -76,10 +78,13 @@ pub fn run_owned(
     let mut inventory = Inventory::new();
     let mut result = None;
     let mut requested = None;
+    let mut paused = false;
     let observed = (|| -> io::Result<()> {
         loop {
-            if let Some(terminal) = &mut terminal {
-                terminal.pump()?;
+            if !paused {
+                if let Some(terminal) = &mut terminal {
+                    terminal.pump()?;
+                }
             }
             inventory.refresh()?;
             if !crate::owner::alive(lease)? {
@@ -115,12 +120,34 @@ pub fn run_owned(
             }
             reap_adopted(primary, &mut inventory)?;
             // Fatal requests select one immutable policy now, even if primary ignores TERM.
-            if let Some(signal) = signals
-                .pending()
+            let events: Vec<_> = signals.pending().collect();
+            if let Some(signal) = events
+                .iter()
+                .copied()
                 .find(|signal| matches!(*signal, SIGHUP | SIGINT | SIGTERM))
             {
                 requested = Some(signal);
                 return Ok(());
+            }
+            if let Some(terminal) = &mut terminal {
+                let stop =
+                    terminal.pause_requested() || events.contains(&signal_hook::consts::SIGTSTP);
+                let resume = events.contains(&signal_hook::consts::SIGCONT);
+                if resume && paused {
+                    inventory.freeze(false)?;
+                    paused = false;
+                }
+                if stop && !resume && !paused {
+                    inventory.freeze(true)?;
+                    terminal.restore()?;
+                    paused = true;
+                    if rustix::io::write(notice, b"S")? != 1 {
+                        return Err(io::Error::other("incomplete native pause acknowledgement"));
+                    }
+                }
+                if paused {
+                    inventory.freeze(true)?;
+                }
             }
             thread::sleep(Duration::from_millis(5));
         }

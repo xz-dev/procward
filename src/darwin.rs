@@ -205,6 +205,31 @@ impl Inventory {
         }
         Ok(())
     }
+    pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
+        let signal = if paused {
+            process::Signal::STOP
+        } else {
+            process::Signal::CONT
+        };
+        self.refresh()?;
+        for (pid, target) in &self.0 {
+            let current = match query(*pid) {
+                Ok(info) => info.as_ref().map(Identity::from_info),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
+            };
+            signal_if_current(
+                target.identity,
+                Ok(current),
+                || match process::kill_process(*pid, signal) {
+                    Ok(()) | Err(Errno::SRCH) => Ok(()),
+                    Err(error) => Err(error.into()),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn forget(&mut self, pid: Pid) {
         self.0.remove(&pid);
         self.1.remove(&pid);

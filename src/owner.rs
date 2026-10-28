@@ -42,6 +42,7 @@ struct PolicyReader {
     bytes: [u8; RECORD_LEN],
     filled: usize,
     policy: Option<Policy>,
+    pause: bool,
 }
 impl PolicyReader {
     fn new() -> Self {
@@ -49,10 +50,27 @@ impl PolicyReader {
             bytes: [0; RECORD_LEN],
             filled: 0,
             policy: None,
+            pause: false,
         }
     }
     fn refresh(&mut self, fd: &OwnedFd, config: Config) -> io::Result<()> {
         loop {
+            if self.filled == 0 {
+                let mut byte = [0];
+                match rio::read(fd, &mut byte) {
+                    Ok(0) | Err(Errno::AGAIN) => return Ok(()),
+                    Err(Errno::INTR) => continue,
+                    Err(error) => return Err(error.into()),
+                    Ok(_) if byte[0] == b'S' => {
+                        self.pause = true;
+                        continue;
+                    }
+                    Ok(_) => {
+                        self.bytes[0] = byte[0];
+                        self.filled = 1;
+                    }
+                }
+            }
             let mut extra = [0];
             let target = if self.filled == RECORD_LEN {
                 &mut extra[..]
@@ -130,6 +148,9 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
     let mut observed = Inventory::new();
     loop {
         policy.refresh(&notice, config)?;
+        if std::mem::take(&mut policy.pause) {
+            process::kill_process(process::getpid(), Signal::STOP)?;
+        }
         #[cfg(target_os = "macos")]
         observed.refresh()?;
         if let Some(status) = anchor.try_wait()? {
@@ -147,7 +168,7 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
             .pending()
             .filter(|signal| *signal != SIGCHLD && *signal != signal_hook::consts::SIGTSTP)
         {
-            if interactive && signal == SIGINT {
+            if interactive && signal == signal_hook::consts::SIGCONT {
                 continue;
             }
             process::kill_process(pid, Signal::from_named_raw(signal).unwrap())?;

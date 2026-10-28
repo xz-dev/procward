@@ -27,6 +27,9 @@ impl Terminal {
         let dir =
             std::env::temp_dir().join(format!("procward-terminal-{}-{label}", std::process::id()));
         stdfs::create_dir(&dir).unwrap();
+        if label == "redirect" {
+            stdfs::write(dir.join("redirect"), b"redirect").unwrap();
+        }
         let pty = rustix_openpty::openpty(None, None).unwrap();
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK).unwrap();
         let raw = pty.user.as_raw_fd();
@@ -94,7 +97,9 @@ impl Terminal {
     }
     fn action(&mut self, text: &str) {
         let n = self.sequence;
-        stdfs::write(self.dir.join(format!("action-{n}")), text).unwrap();
+        let record = self.dir.join("action.tmp");
+        stdfs::write(&record, text).unwrap();
+        stdfs::rename(record, self.dir.join(format!("action-{n}"))).unwrap();
         self.until("shell action acknowledgement", |t| {
             t.dir.join(format!("acted-{n}")).exists()
         });
@@ -169,4 +174,94 @@ fn shell_reclaim_does_not_block_fatal_cleanup_or_kill_shell() {
         terminal.host.wait().unwrap().success(),
         "unrelated shell must survive"
     );
+}
+
+fn stopped(pid: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    return stdfs::read_to_string(format!("/proc/{pid}/stat"))
+        .unwrap()
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        == Some("T");
+    #[cfg(not(target_os = "linux"))]
+    {
+        let state = Command::new("ps")
+            .args(["-o", "state=", "-p", pid])
+            .output()
+            .unwrap();
+        assert!(
+            state.status.success(),
+            "process state query failed: {state:?}"
+        );
+        String::from_utf8(state.stdout)
+            .unwrap()
+            .trim()
+            .starts_with('T')
+    }
+}
+
+#[test]
+fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont_race() {
+    let mut terminal = Terminal::new("job-control");
+    terminal.until("primary and detached worker readiness", |t| {
+        t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+    });
+    for cycle in 0..3 {
+        let _ = stdfs::remove_file(terminal.dir.join("stopped"));
+        terminal.input(&[26]);
+        terminal.until("shell sees stopped job", |t| t.dir.join("stopped").exists());
+        assert_eq!(
+            terminal.file("stopped"),
+            "true",
+            "pause must restore saved cooked settings"
+        );
+        terminal.until("primary and detached worker stopped", |t| {
+            stopped(&t.file("primary")) && stopped(&t.file("worker"))
+        });
+        terminal.action("race");
+        terminal.until("freeze wins detached CONT race without extra Ctrl-Z", |t| {
+            stopped(&t.file("worker"))
+        });
+        terminal.action("bg");
+        terminal.until("private work resumed in background", |t| {
+            !stopped(&t.file("worker")) && !stopped(&t.file("primary"))
+        });
+        terminal.input(b"p");
+        stdfs::write(terminal.dir.join(format!("ping-{cycle}")), b"ping").unwrap();
+        terminal.until("background worker response", |t| {
+            t.dir.join(format!("pong-{cycle}")).exists()
+        });
+        let previous = terminal.output.matches("REPLY").count();
+        assert_eq!(
+            previous, cycle,
+            "background job must not steal physical input/output"
+        );
+        terminal.action("fg");
+        terminal.until("foreground input/output restored", |t| {
+            t.output.matches("REPLY").count() == cycle + 1
+        });
+    }
+    terminal.input(b"q");
+    terminal.until("result and tail", |t| {
+        t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
+    });
+    assert_eq!(terminal.file("result"), "23");
+    assert!(terminal.host.wait().unwrap().success());
+}
+
+#[test]
+fn interactive_stderr_keeps_its_redirected_destination() {
+    let mut terminal = Terminal::new("redirect");
+    terminal.until("ready output", |t| t.output.contains("TTY-READY"));
+    terminal.input(b"q");
+    terminal.until("redirected result and output", |t| {
+        t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
+    });
+    assert_eq!(terminal.file("result"), "23");
+    assert_eq!(terminal.file("stderr"), "REDIRECTED-TAIL\n");
+    assert!(!terminal.output.contains("REDIRECTED-TAIL"));
+    assert!(terminal.host.wait().unwrap().success());
 }
