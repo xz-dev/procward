@@ -1,7 +1,7 @@
 # Platform lifecycle guarantees
 
-These are current noninteractive backend guarantees, not a claim that pending
-terminal/contract/release tasks are complete.
+These are current lifecycle and Unix terminal guarantees, not release acceptance.
+Final documentation/release setup remains pending.
 
 | Backend | Authority and completion | Limits |
 | --- | --- | --- |
@@ -10,8 +10,10 @@ terminal/contract/release tasks are complete.
 | Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised |
 | macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape |
 
-Linux/FreeBSD have a shell-facing owner and a separate-process-group reaper
-anchor. Both can reap; the surviving role cleans after the other dies. The
+Linux/FreeBSD have a shell-facing owner and a reaper anchor. Noninteractive
+anchors use a separate process group; interactive native roles share the caller's
+job group and catch TTIN/TTOU without masking them. Both can reap; the surviving
+role cleans after the other dies. The
 anchor's required parent-death SIGCONT wake is armed and its live parent checked
 before launch permission. A close-on-exec pipe carries the one launch grant and
 then owner liveness, not a payload-inherited ownership lease. macOS uses the same
@@ -114,3 +116,44 @@ before the first inventory observation. Its surviving worker is reported as the
 expected platform limitation and rescued separately. This passing limitation
 demonstration is not evidence of universal containment or product cleanup of
 that worker.
+
+## Unix private terminal lifetime
+
+Interactive commands use one private PTY. A small same-binary session keeper
+outlives the foreground payload until the relay has drained normal output. This
+is the standard shell/login arrangement, not another reaper, watchdog or public
+mode. Native ownership/cleanup roles stay in the caller's session, outside the
+frozen workload; the private keeper is inside that workload and pauses with it.
+Noninteractive and per-task execution creates no PTY/session keeper.
+
+FreeBSD requires this retained session lifetime. Its
+[exit1 path](https://github.com/freebsd/freebsd-src/blob/releng/14.3/sys/kern/kern_exit.c)
+notes that killjobc revokes a session leader's controlling tty. The
+[tty close path](https://github.com/freebsd/freebsd-src/blob/releng/14.3/sys/kern/tty.c)
+then frees tty queues. A fresh fixture proved the effect: the direct session
+leader flushed its final stdout/stderr and exited 23, while the relay returned
+23 with no final marker and zero pending physical output. Holding an extra slave
+fd did not prevent the loss. Retaining the session leader until output drain
+avoids that revocation race on the same Unix path.
+
+The keeper performs login_tty once. A trusted startup gate puts the actual
+payload in the private foreground group before untrusted exec; it does not
+stack a second session setup on login_tty. The payload's managed READY record
+names that live immediate native parent and the actual payload PID, as required
+by [contract.md](contract.md). Ordinary children get no private keeper control
+or startup-grant endpoints.
+
+On normal primary exit, the native relay continues output while cleaning other
+owned descendants. Only after no other owned work remains and private/relay
+output queues are empty does it release the keeper, preserving the payload's
+exact exit/signal-derived result. The keeper bounds its own final-drain wait by
+the configured cleanup deadline; it cannot restart or extend native escalation.
+A missing drain acknowledgement, controller loss or expired deadline is failure,
+not successful output completion. Fatal cleanup can discard output and remains
+independent of stopped keepers or blocked physical output.
+
+Restoration still uses authorized kernel calls on the physical terminal; no
+TTIN/TTOU masking or private-session physical write bypasses denial. BSD's
+transient PENDIN state is settled by the shell fixture's read-only input
+readiness query before comparing all saved cooked settings; it neither consumes
+nor flushes input and does not mask a configuration mismatch.
