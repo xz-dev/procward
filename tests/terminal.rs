@@ -435,3 +435,15 @@ fn owner_loss_while_paused_cleans_work_without_foreground_rescue() {
     assert!(terminal.finish_host().success());
     assert_eq!(terminal.file("takeover-final"), terminal.file("takeover"));
 }
+
+#[test]
+fn repeated_blocked_terminal_cleanup_survives_foreground_reclaim() {
+    let iterations = std::env::var("PROCWARD_TERMINAL_STRESS")
+        .map(|value| value.parse::<usize>().unwrap())
+        .unwrap_or(8);
+    assert!(iterations >= 8);
+    for iteration in 1..=iterations {
+        eprintln!("blocked terminal iteration {iteration}/{iterations}");
+        fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authority();
+    }
+}

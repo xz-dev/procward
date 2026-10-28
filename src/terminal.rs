@@ -75,17 +75,7 @@ impl Terminal {
         args: &[OsString],
         deadline: std::time::Duration,
     ) -> io::Result<Command> {
-        // signal-hook uses SA_RESTART; tty authority denial must return, not loop on SIGTTOU.
-        unsafe {
-            let mut action = std::mem::zeroed();
-            if libc::sigaction(libc::SIGTTOU, std::ptr::null(), &mut action) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            action.sa_flags &= !libc::SA_RESTART;
-            if libc::sigaction(libc::SIGTTOU, &action, std::ptr::null_mut()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
+        interrupt_job_control()?;
         let raw = self.user.as_ref().unwrap().as_raw_fd();
         let (control, peer) = std::os::unix::net::UnixStream::pair()?;
         control.set_nonblocking(true)?;
@@ -590,5 +580,135 @@ fn run_keeper(
         } else {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+}
+
+fn interrupt_job_control() -> io::Result<()> {
+    // signal-hook uses SA_RESTART; tty authority denial must return to ownership checks.
+    unsafe {
+        for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+            let mut action = std::mem::zeroed();
+            if libc::sigaction(signal, std::ptr::null(), &mut action) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            action.sa_flags &= !libc::SA_RESTART;
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn background_read_after_foreground_reclaim_returns_to_cleanup() {
+        let test = "terminal::tests::background_read_after_foreground_reclaim_returns_to_cleanup";
+        let child_command = || {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", test, "--nocapture"]);
+            command
+        };
+        if let Some(dir) = std::env::var_os("PROCWARD_READ_RACE") {
+            let dir = std::path::PathBuf::from(dir);
+            if std::env::var_os("PROCWARD_BACKGROUND_READER").is_some() {
+                let mut signals =
+                    signal_hook::iterator::Signals::new([libc::SIGTTIN, libc::SIGTTOU]).unwrap();
+                interrupt_job_control().unwrap();
+                let physical =
+                    rustix::io::fcntl_dupfd_cloexec(unsafe { BorrowedFd::borrow_raw(0) }, 3)
+                        .unwrap();
+                while termios::tcgetpgrp(&physical).unwrap() != process::getpgrp() {
+                    thread::yield_now();
+                }
+                fs::write(dir.join("foreground"), b"checked before read").unwrap();
+                while !dir.join("reclaimed").exists() {
+                    thread::yield_now();
+                }
+                let mut input = Vec::new();
+                assert_eq!(
+                    read_buffer(&physical, &mut input, false).unwrap(),
+                    (false, 0)
+                );
+                assert!(signals.pending().any(|signal| signal == libc::SIGTTIN));
+                return;
+            }
+            rustix_openpty::login_tty(
+                rustix::io::fcntl_dupfd_cloexec(unsafe { BorrowedFd::borrow_raw(0) }, 3).unwrap(),
+            )
+            .unwrap();
+            // Shell fixture alone may change foreground while in background.
+            unsafe {
+                libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            }
+            let mut reader = child_command()
+                .env("PROCWARD_BACKGROUND_READER", "1")
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let tty = unsafe { BorrowedFd::borrow_raw(0) };
+            termios::tcsetpgrp(tty, process::Pid::from_raw(reader.id() as i32).unwrap()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !dir.join("foreground").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+            termios::tcsetpgrp(tty, process::getpgrp()).unwrap();
+            fs::write(dir.join("reclaimed"), b"read must now return EINTR").unwrap();
+            let status = loop {
+                if let Some(status) = reader.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(1));
+            };
+            if status.is_none() {
+                reader.kill().unwrap();
+                reader.wait().unwrap();
+            }
+            assert!(
+                status.is_some_and(|status| status.success()),
+                "background read did not return after foreground reclaim: {status:?}"
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("procward-read-race-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let pty = rustix_openpty::openpty(None, None).unwrap();
+        let mut host = child_command()
+            .env("PROCWARD_READ_RACE", &dir)
+            .stdin(Stdio::from(pty.user))
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let status = loop {
+            if let Some(status) = host.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        if status.is_none() {
+            host.kill().unwrap();
+            host.wait().unwrap();
+        }
+        fs::remove_dir_all(dir).unwrap();
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "foreground reclaim read regression: {status:?}"
+        );
     }
 }
