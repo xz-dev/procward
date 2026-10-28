@@ -382,6 +382,10 @@ impl Run {
     }
     fn clean(&mut self, deadline: Instant) {
         poll(deadline, || self.targets.iter().all(Identity::gone));
+        assert!(
+            Instant::now() <= deadline,
+            "nested tree completion observed after configured deadline"
+        );
         self.done = true;
     }
 }
