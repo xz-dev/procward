@@ -168,6 +168,7 @@ pub fn child(dir: &Path) {
     .unwrap();
     let mut state = termios::tcgetattr(stdin).unwrap();
     state.make_raw();
+    state.local_modes |= termios::LocalModes::ISIG;
     termios::tcsetattr(stdin, termios::OptionalActions::Now, &state).unwrap();
     let interrupts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = interrupts.clone();
@@ -219,9 +220,6 @@ pub fn child(dir: &Path) {
                         interrupts.load(std::sync::atomic::Ordering::SeqCst)
                     );
                     std::io::stdout().flush().unwrap();
-                }
-                3 => {
-                    rp::kill_process(rp::getpid(), Signal::INT).unwrap();
                 }
                 26 => {
                     rp::kill_process(rp::getpid(), Signal::TSTP).unwrap();

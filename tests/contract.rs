@@ -286,7 +286,7 @@ fn owner_loss_notifies_cooperative_primary_and_bounds_blocked_primary_by_configu
             .arg(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(fs::File::create(dir.join("stderr.log")).unwrap())
             .spawn()
             .unwrap();
         let mut case = Case {
@@ -321,10 +321,17 @@ fn owner_loss_notifies_cooperative_primary_and_bounds_blocked_primary_by_configu
             case.owner.kill().unwrap();
         }
         let deadline = fault + Duration::from_secs(2);
-        while !case.targets.iter().copied().all(gone) || case.owner.try_wait().unwrap().is_none() {
+        loop {
+            let owner_done = case.owner.try_wait().unwrap().is_some();
+            if case.targets.iter().copied().all(gone) && owner_done {
+                break;
+            }
             assert!(
                 Instant::now() < deadline,
-                "{mode}: original configured deadline exceeded"
+                "{mode}: original configured deadline exceeded; targets={:?}; notification={:?}; stderr={:?}",
+                case.targets,
+                fs::read_to_string(case.dir.join("notification")),
+                fs::read_to_string(case.dir.join("stderr.log"))
             );
             thread::sleep(Duration::from_millis(2));
         }
