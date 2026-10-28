@@ -25,9 +25,9 @@ tests. The lockfile includes target-specific dependency resolution.
 
 ## Dependency updates
 
-Dependabot checks Cargo and GitHub Actions daily, with up to 20 open version-update
-PRs per ecosystem. Its PRs run the normal full `pull_request` CI; no auto-merge is
-configured. SHA-pinned `uses:` references keep their version comments (`# v4`,
+Dependabot checks Cargo, GitHub Actions and Docker image pins daily, with up to 20
+open version-update PRs per ecosystem. Its PRs run the normal full `pull_request`
+CI; no auto-merge is configured. SHA-pinned `uses:` references keep their version comments (`# v4`,
 `# v7.0.2`, etc.) so Dependabot can update the SHA and version comment together.
 
 `process-wrap` and `rustix` are explicitly excluded from automatic version updates
@@ -37,18 +37,24 @@ vendor only after its required fixes are available and the full matrix passes.
 Refresh Cargo.lock and the dependency licence inventory/bundle with dependency
 changes. An ignored vendor is not automatically monitored by this configuration.
 
-### Manual container-image refresh
+### Automated container-image updates
 
-Dependabot does not cover these image references in workflow commands, matrix
-values or action inputs. Check upstream tags/digests manually and update every
-listed location together; retain architecture checks and full fixture execution.
+Each `.github/ci-images/*/Dockerfile` contains one `FROM tag@sha256:…` reference.
+Dependabot's Docker ecosystem scans all four directories and updates tags/digests,
+including new digests when moving tags such as Debian `unstable-slim` are rebuilt.
+These Dockerfiles are reference manifests only: CI and release workflows read
+`FROM` with `sed -n 's/^FROM //p'`, expose step outputs and pass the exact pinned
+reference to Docker runners or the setup-qemu action. Nothing is built from them.
 
-| Image / purpose | Current digest | Locations |
-| --- | --- | --- |
-| `alpine:3.23`, native x64/arm64 musl | `sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63` | `.github/workflows/ci.yml`, `.github/scripts/run-musl.sh` |
-| `debian:unstable-slim`, riscv64 GNU | `sha256:d20827a3ee132f4ddf5307a4f56899e3a0ba8a7406ce51569729c564eb7d9dde` | `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
-| `alpine:3.23`, riscv64 musl | `sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96` | `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
-| `tonistiigi/binfmt`, qemu-user registration | `sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0` | `.github/workflows/ci.yml`, `.github/workflows/release.yml` |
+| Dockerfile directory | Image purpose |
+| --- | --- |
+| `.github/ci-images/alpine-native` | Alpine, native x64/arm64 musl fixtures |
+| `.github/ci-images/alpine-riscv64` | Alpine, riscv64 musl fixtures |
+| `.github/ci-images/debian-riscv64` | Debian unstable-slim, riscv64 GNU fixtures |
+| `.github/ci-images/binfmt` | tonistiigi/binfmt, qemu-user registration |
+
+Review image-update PRs with the same architecture checks and full fixture CI as
+other changes; do not replace runtime execution with a build-only check.
 
 ## Runtime fixtures
 
