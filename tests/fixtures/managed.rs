@@ -284,120 +284,13 @@ pub fn nested(dir: &Path, probe: bool) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn only_inner_pipe(raw: &str) -> io::Result<()> {
-    use rustix::{
-        fd::BorrowedFd,
-        fs::{FileType, fstat},
-        io::Errno,
-    };
-    let inner: i32 = raw.parse().map_err(io::Error::other)?;
-    #[cfg(target_os = "freebsd")]
-    let descriptors = {
-        // FreeBSD's default devfs /dev/fd lists only 0, 1 and 2; scan the actual limit.
-        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile)
-            .current
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or_else(|| io::Error::other("cannot enumerate unbounded descriptor table"))?;
-        (3..limit).collect::<Vec<_>>()
-    };
-    #[cfg(not(target_os = "freebsd"))]
-    let descriptors = {
-        let directory = if cfg!(target_os = "linux") {
-            "/proc/self/fd"
-        } else {
-            "/dev/fd"
-        };
-        fs::read_dir(directory)?
-            .map(|entry| {
-                entry?
-                    .file_name()
-                    .to_string_lossy()
-                    .parse::<i32>()
-                    .map_err(io::Error::other)
-            })
-            .collect::<io::Result<Vec<_>>>()?
-    };
-    for fd in descriptors {
-        if fd <= 2 || fd == inner {
-            continue;
-        }
-        match fstat(unsafe { BorrowedFd::borrow_raw(fd) }) {
-            Ok(stat) => assert_ne!(
-                FileType::from_raw_mode(stat.st_mode),
-                FileType::Fifo,
-                "outer lifecycle or private pipe leaked into inner payload: fd {fd}"
-            ),
-            Err(Errno::BADF) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn only_inner_pipe(raw: &str) -> io::Result<()> {
-    use windows_sys::Win32::{
-        Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
-        Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
-        System::{
-            Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
-            Diagnostics::ProcessSnapshotting::*,
-            Threading::GetCurrentProcess,
-        },
-    };
-    let inner: usize = raw.parse().map_err(io::Error::other)?;
-    unsafe {
-        let mut snapshot = std::ptr::null_mut();
-        let result = PssCaptureSnapshot(GetCurrentProcess(), PSS_CAPTURE_HANDLES, 0, &mut snapshot);
-        if result != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(result as i32));
-        }
-        let mut marker = std::ptr::null_mut();
-        let result = PssWalkMarkerCreate(std::ptr::null(), &mut marker);
-        if result != ERROR_SUCCESS {
-            PssFreeSnapshot(GetCurrentProcess(), snapshot);
-            return Err(io::Error::from_raw_os_error(result as i32));
-        }
-        let stdio = [
-            GetStdHandle(STD_INPUT_HANDLE),
-            GetStdHandle(STD_OUTPUT_HANDLE),
-            GetStdHandle(STD_ERROR_HANDLE),
-        ];
-        let mut leaked = Vec::new();
-        let result = loop {
-            let mut entry = PSS_HANDLE_ENTRY::default();
-            let result = PssWalkSnapshot(
-                snapshot,
-                PSS_WALK_HANDLES,
-                marker,
-                (&mut entry as *mut PSS_HANDLE_ENTRY).cast(),
-                std::mem::size_of_val(&entry) as u32,
-            );
-            if result == ERROR_NO_MORE_ITEMS {
-                break Ok(());
-            }
-            if result != ERROR_SUCCESS {
-                break Err(io::Error::from_raw_os_error(result as i32));
-            }
-            if entry.Handle as usize != inner
-                && !stdio.contains(&entry.Handle)
-                && GetFileType(entry.Handle) == FILE_TYPE_PIPE
-            {
-                leaked.push(entry.Handle as usize);
-            }
-        };
-        assert_eq!(PssWalkMarkerFree(marker), ERROR_SUCCESS);
-        assert_eq!(
-            PssFreeSnapshot(GetCurrentProcess(), snapshot),
-            ERROR_SUCCESS
-        );
-        result?;
-        assert!(
-            leaked.is_empty(),
-            "outer lifecycle or private pipe HANDLE leaked: {leaked:?}"
-        );
-    }
+    let inner = raw.parse::<usize>().map_err(io::Error::other)?;
+    assert_eq!(
+        super::pipes::open()?,
+        vec![inner],
+        "outer lifecycle or private pipe leaked into inner payload"
+    );
     Ok(())
 }
 

@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "fixtures/pipes.rs"]
+mod pipes;
+
 const DEADLINE: Duration = Duration::from_millis(2500);
 fn poll(deadline: Instant, mut condition: impl FnMut() -> bool) {
     while !condition() {
@@ -149,12 +152,23 @@ impl Identity {
         rustix::process::pidfd_send_signal(&self.fd, rustix::process::Signal::KILL).unwrap();
         #[cfg(target_os = "freebsd")]
         {
-            let owned = rustix::process::get_reaper_pids(None).unwrap();
+            use rustix::process::{self, IdType, PidInfoFlags};
+            let mut reapers = vec![process::getpid()];
+            let mut owned = Vec::new();
+            while let Some(reaper) = reapers.pop() {
+                // GETPIDS omits descendants below subordinate reapers; traverse each domain.
+                for info in process::get_reaper_pids(Some((IdType::Pid, reaper))).unwrap() {
+                    if info.flags.contains(PidInfoFlags::REAPER) {
+                        reapers.push(info.pid);
+                    }
+                    owned.push(info.pid);
+                }
+            }
             assert!(
                 owned
                     .iter()
-                    .any(|p| p.pid.as_raw_nonzero().get() as u32 == self.pid),
-                "target left test's reaper subtree"
+                    .any(|pid| pid.as_raw_nonzero().get() as u32 == self.pid),
+                "target left test's nested reaper subtree"
             );
             rustix::process::kill_process(
                 rustix::process::Pid::from_raw(self.pid as i32).unwrap(),
@@ -195,6 +209,29 @@ struct Run {
 }
 impl Run {
     fn start(label: &str, mode: &str) -> Self {
+        static CALLER_HYGIENE: std::sync::Once = std::sync::Once::new();
+        CALLER_HYGIENE.call_once(|| {
+            // CI runners leave unrelated pipes inheritable; launch with only stdio, not runner internals.
+            for raw in pipes::open().unwrap() {
+                #[cfg(unix)]
+                rustix::io::fcntl_setfd(
+                    unsafe { rustix::fd::BorrowedFd::borrow_raw(raw as i32) },
+                    rustix::io::FdFlags::CLOEXEC,
+                )
+                .unwrap();
+                #[cfg(windows)]
+                assert_ne!(
+                    unsafe {
+                        windows_sys::Win32::Foundation::SetHandleInformation(
+                            raw as _,
+                            windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT,
+                            0,
+                        )
+                    },
+                    0
+                );
+            }
+        });
         #[cfg(target_os = "linux")]
         rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT)).unwrap();
         #[cfg(target_os = "freebsd")]
@@ -255,16 +292,31 @@ impl Run {
         #[cfg(unix)]
         let inner = {
             fn parent(pid: u32) -> u32 {
-                let out = Command::new("ps")
-                    .args(["-o", "ppid=", "-p", &pid.to_string()])
-                    .output()
-                    .unwrap();
-                assert!(out.status.success(), "parent query: {out:?}");
-                String::from_utf8(out.stdout)
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap()
+                #[cfg(target_os = "linux")]
+                {
+                    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+                    stat.rsplit_once(')')
+                        .unwrap()
+                        .1
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let out = Command::new("ps")
+                        .args(["-o", "ppid=", "-p", &pid.to_string()])
+                        .output()
+                        .unwrap();
+                    assert!(out.status.success(), "parent query: {out:?}");
+                    String::from_utf8(out.stdout)
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap()
+                }
             }
             self.targets.push(Identity::open(anchor));
             let inner = parent(anchor);
@@ -292,17 +344,33 @@ impl Run {
         );
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         poll(Instant::now() + Duration::from_secs(10), || {
-            let out = Command::new("ps")
-                .args([
-                    "-o",
-                    "state=",
-                    "-p",
-                    &self.pid("nested-worker.pid").to_string(),
-                ])
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "stopped worker query: {out:?}");
-            String::from_utf8(out.stdout).unwrap().contains('T')
+            #[cfg(target_os = "linux")]
+            {
+                let stat =
+                    fs::read_to_string(format!("/proc/{}/stat", self.pid("nested-worker.pid")))
+                        .unwrap();
+                stat.rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    == "T"
+            }
+            #[cfg(target_os = "freebsd")]
+            {
+                let out = Command::new("ps")
+                    .args([
+                        "-o",
+                        "state=",
+                        "-p",
+                        &self.pid("nested-worker.pid").to_string(),
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "stopped worker query: {out:?}");
+                String::from_utf8(out.stdout).unwrap().contains('T')
+            }
         });
         inner
     }

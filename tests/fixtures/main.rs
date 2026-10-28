@@ -11,6 +11,7 @@ use std::{
 };
 
 mod managed;
+mod pipes;
 #[cfg(unix)]
 mod terminal;
 #[cfg(windows)]
