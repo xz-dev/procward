@@ -471,6 +471,25 @@ fn anchor_loss_restores_raw_terminal_only_with_foreground_authority() {
             fault.elapsed() < Duration::from_secs(2),
             "configured teardown deadline"
         );
+        if terminal.output.contains(
+            "procward: macOS best-effort observer lost; pre-observation descendants may escape after reparenting",
+        ) {
+            eprintln!(
+                "HARNESS CLEANUP: Darwin pre-observation observer-loss window; known terminal fixtures cleaned by test, NOT product cleanup"
+            );
+            for name in ["primary", "worker", "keeper", "anchor"] {
+                let pid = terminal.file(name);
+                if !absent(&pid) {
+                    match process::kill_process(
+                        Pid::from_raw(pid.parse().unwrap()).unwrap(),
+                        Signal::KILL,
+                    ) {
+                        Ok(()) | Err(Errno::SRCH) => {}
+                        Err(error) => panic!("known terminal fixture cleanup failed: {error}"),
+                    }
+                }
+            }
+        }
         terminal.until("owned identities gone", |t| {
             ["primary", "worker", "keeper", "anchor"]
                 .iter()

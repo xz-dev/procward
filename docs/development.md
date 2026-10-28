@@ -89,6 +89,15 @@ published limitation; any survivors are labelled test harness cleanup, not
 product cleanup. PID-file readiness does not establish observation. Darwin
 completion is best-effort.
 
+The raw-terminal anchor-loss regression in CI `40718431017` at `24f14ab`
+returned 125 with the explicit macOS pre-observation limitation, then failed its
+unconditional owned-identity absence check. That test now permits labelled
+harness cleanup of known fixture PIDs only when the product emits
+`macOS best-effort observer lost; pre-observation descendants may escape after reparenting`.
+Status 125, original teardown deadline, terminal restoration and unrelated
+foreground-state assertions remain strict. Without that message, identity
+absence still requires product cleanup; no product code or other test changed.
+
 With defaults, Linux/FreeBSD use one immutable cleanup policy: TERM then one CONT
 per newly adopted child during grace, KILL afterwards, no late rescue CONT and a
 7.5-second cap.
