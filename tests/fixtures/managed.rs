@@ -286,8 +286,38 @@ pub fn nested(dir: &Path, probe: bool) -> io::Result<()> {
 
 fn only_inner_pipe(raw: &str) -> io::Result<()> {
     let inner = raw.parse::<usize>().map_err(io::Error::other)?;
+    let pipes = super::pipes::open()?;
+    #[cfg(windows)]
+    if pipes != [inner] {
+        use windows_sys::Win32::{
+            Foundation::GetHandleInformation,
+            System::{
+                Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+                Pipes::GetNamedPipeServerProcessId,
+            },
+        };
+        eprintln!(
+            "PIPE ORIGINS: payload={} inner={inner} stdio={:?}",
+            process::id(),
+            unsafe {
+                [
+                    GetStdHandle(STD_INPUT_HANDLE) as usize,
+                    GetStdHandle(STD_OUTPUT_HANDLE) as usize,
+                    GetStdHandle(STD_ERROR_HANDLE) as usize,
+                ]
+            }
+        );
+        for raw in &pipes {
+            let (mut server, mut flags) = (0, 0);
+            let server_ok = unsafe { GetNamedPipeServerProcessId(*raw as _, &mut server) };
+            let flags_ok = unsafe { GetHandleInformation(*raw as _, &mut flags) };
+            eprintln!(
+                "PIPE {raw}: server={server} query={server_ok}, flags={flags} query={flags_ok}"
+            );
+        }
+    }
     assert_eq!(
-        super::pipes::open()?,
+        pipes,
         vec![inner],
         "outer lifecycle or private pipe leaked into inner payload"
     );

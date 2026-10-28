@@ -462,7 +462,9 @@ fn nested_payload_has_only_inner_contract_metadata_and_transport() {
     assert_eq!(
         status.code(),
         Some(23),
-        "nested contract isolation: {:?}",
+        "nested contract isolation: outer={} inner={:?}; {:?}",
+        run.child.id(),
+        fs::read_to_string(run.dir.join("inner-anchor")),
         fs::read_to_string(run.dir.join("stderr.log"))
     );
     assert_eq!(
