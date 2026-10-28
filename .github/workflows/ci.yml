@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Source, executor and toolchain
@@ -57,7 +57,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Read native musl image pin
@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
@@ -136,7 +136,7 @@ jobs:
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER: bash .github/scripts/run-riscv64.sh
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Read target runtime and binfmt image pins
