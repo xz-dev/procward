@@ -25,8 +25,9 @@ tests. The lockfile includes target-specific dependency resolution.
 
 ## Dependency updates
 
-Dependabot checks Cargo, GitHub Actions and Docker image pins daily, with up to 20
-open version-update PRs per ecosystem. Its PRs run the normal full `pull_request`
+Dependabot checks Cargo, GitHub Actions and Docker image pins daily. Cargo and
+Actions allow up to 20 open version-update PRs each; Docker allows 5 per image
+directory, 20 across the four images. Its PRs run the normal full `pull_request`
 CI; no auto-merge is configured. SHA-pinned `uses:` references keep their version comments (`# v4`,
 `# v7.0.2`, etc.) so Dependabot can update the SHA and version comment together.
 
@@ -39,7 +40,7 @@ changes. An ignored vendor is not automatically monitored by this configuration.
 
 ### Automated container-image updates
 
-Each `.github/ci-images/*/Dockerfile` contains one `FROM tag@sha256:…` reference.
+Each `ci/images/*/Dockerfile` contains one `FROM tag@sha256:…` reference.
 Dependabot's Docker ecosystem scans all four directories and updates tags/digests,
 including new digests when moving tags such as Debian `unstable-slim` are rebuilt.
 These Dockerfiles are reference manifests only: CI and release workflows read
@@ -48,10 +49,10 @@ reference to Docker runners or the setup-qemu action. Nothing is built from them
 
 | Dockerfile directory | Image purpose |
 | --- | --- |
-| `.github/ci-images/alpine-native` | Alpine, native x64/arm64 musl fixtures |
-| `.github/ci-images/alpine-riscv64` | Alpine, riscv64 musl fixtures |
-| `.github/ci-images/debian-riscv64` | Debian unstable-slim, riscv64 GNU fixtures |
-| `.github/ci-images/binfmt` | tonistiigi/binfmt, qemu-user registration |
+| `ci/images/alpine-native` | Alpine, native x64/arm64 musl fixtures |
+| `ci/images/alpine-riscv64` | Alpine, riscv64 musl fixtures |
+| `ci/images/debian-riscv64` | Debian unstable-slim, riscv64 GNU fixtures |
+| `ci/images/binfmt` | tonistiigi/binfmt, qemu-user registration |
 
 Review image-update PRs with the same architecture checks and full fixture CI as
 other changes; do not replace runtime execution with a build-only check.
