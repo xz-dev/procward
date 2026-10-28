@@ -62,7 +62,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Read native musl image pin
         id: images
-        run: echo "runtime=$(sed -n 's/^FROM //p' .github/ci-images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
+        run: echo "runtime=$(sed -n 's/^FROM //p' ci/images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
       - name: Native musl build and full fixture execution
         run: |
           docker run --rm -v "$PWD:/src" -w /src '${{ steps.images.outputs.runtime }}' sh -ec '
@@ -142,10 +142,10 @@ jobs:
       - name: Read target runtime and binfmt image pins
         id: images
         run: |
-          runtime=$(sed -n 's/^FROM //p' '.github/ci-images/${{ matrix.image }}/Dockerfile')
+          runtime=$(sed -n 's/^FROM //p' 'ci/images/${{ matrix.image }}/Dockerfile')
           {
             echo "runtime=$runtime"
-            echo "binfmt=$(sed -n 's/^FROM //p' .github/ci-images/binfmt/Dockerfile)"
+            echo "binfmt=$(sed -n 's/^FROM //p' ci/images/binfmt/Dockerfile)"
           } >> "$GITHUB_OUTPUT"
           echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3

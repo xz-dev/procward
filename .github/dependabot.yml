@@ -15,11 +15,22 @@ updates:
     open-pull-requests-limit: 20
     commit-message: { prefix: "ci(deps)" }
   - package-ecosystem: docker
-    directories:
-      - /.github/ci-images/alpine-native
-      - /.github/ci-images/alpine-riscv64
-      - /.github/ci-images/binfmt
-      - /.github/ci-images/debian-riscv64
+    directory: /ci/images/alpine-native
     schedule: { interval: daily }
-    open-pull-requests-limit: 20
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "ci(deps)" }
+  - package-ecosystem: docker
+    directory: /ci/images/alpine-riscv64
+    schedule: { interval: daily }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "ci(deps)" }
+  - package-ecosystem: docker
+    directory: /ci/images/binfmt
+    schedule: { interval: daily }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "ci(deps)" }
+  - package-ecosystem: docker
+    directory: /ci/images/debian-riscv64
+    schedule: { interval: daily }
+    open-pull-requests-limit: 5
     commit-message: { prefix: "ci(deps)" }
