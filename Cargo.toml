@@ -36,6 +36,10 @@ path = "tests/terminal.rs"
 name = "contract"
 path = "tests/contract.rs"
 
+[[test]]
+name = "task"
+path = "tests/task.rs"
+
 [[example]]
 name = "fixture"
 path = "tests/fixtures/main.rs"
@@ -53,7 +57,7 @@ windows-sys = { version = "=0.61.2", default-features = false, features = ["Win3
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
 process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "pipe", "time", "termios", "stdio"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "pipe", "time", "termios", "stdio", "net"] }
 rustix-openpty = "=0.2.0"
 signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
 

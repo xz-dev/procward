@@ -19,7 +19,7 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     let fd = fd.to_str().unwrap().parse::<i32>().unwrap();
     rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
     let tty = unsafe { BorrowedFd::borrow_raw(0) };
-    let saved = termios::tcgetattr(tty).unwrap();
+    let saved = observe_settings(tty);
     publish(dir.join("saved-state"), format!("{saved:?}")).unwrap();
     let mut child = Command::new(binary);
     child
@@ -70,14 +70,14 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                 termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
                 publish(
                     dir.join("paused-state"),
-                    format!("{:?}", termios::tcgetattr(tty).unwrap()),
+                    format!("{:?}", observe_settings(tty)),
                 )
                 .unwrap();
                 publish(
                     dir.join("stopped"),
                     format!(
                         "{}",
-                        format!("{:?}", termios::tcgetattr(tty).unwrap()) == format!("{saved:?}")
+                        format!("{:?}", observe_settings(tty)) == format!("{saved:?}")
                     ),
                 )
                 .unwrap();
@@ -91,13 +91,13 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                     dir.join("restored"),
                     format!(
                         "{}",
-                        format!("{:?}", termios::tcgetattr(tty).unwrap()) == format!("{saved:?}")
+                        format!("{:?}", observe_settings(tty)) == format!("{saved:?}")
                     ),
                 )
                 .unwrap();
                 publish(
                     dir.join("takeover-final"),
-                    format!("{:?}", termios::tcgetattr(tty).unwrap()),
+                    format!("{:?}", observe_settings(tty)),
                 )
                 .unwrap();
                 if dir.join("keep").exists() {
@@ -120,7 +120,7 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                 "reclaim" => termios::tcsetpgrp(tty, rp::getpgrp()).unwrap(),
                 "takeover" => {
                     termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
-                    let mut state = termios::tcgetattr(tty).unwrap();
+                    let mut state = observe_settings(tty);
                     state.local_modes ^= termios::LocalModes::ECHO;
                     termios::tcsetattr(tty, termios::OptionalActions::Now, &state).unwrap();
                     publish(dir.join("takeover"), format!("{state:?}")).unwrap();
@@ -252,4 +252,10 @@ fn publish(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<(
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)
+}
+
+fn observe_settings(tty: BorrowedFd<'_>) -> termios::Termios {
+    // BSD settles its transient PENDIN on a readiness query, without consuming or flushing input.
+    rio::ioctl_fionread(tty).unwrap();
+    termios::tcgetattr(tty).unwrap()
 }

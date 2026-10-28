@@ -17,7 +17,12 @@ unsafe extern "system" fn console_control(event: u32) -> i32 {
     1
 }
 
-pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) -> io::Result<u32> {
+pub fn run(
+    command: &OsStr,
+    args: &[OsString],
+    config: crate::config::Config,
+    mut task: Option<&mut crate::task::Task>,
+) -> io::Result<u32> {
     if unsafe { SetConsoleCtrlHandler(Some(console_control), 1) } == 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32)
@@ -46,7 +51,7 @@ pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) ->
         let mut notified = false;
         // JobObject::wait waits for the entire Job; observe only its immediate inner primary first.
         let status = loop {
-            if CLOSING.load(Ordering::SeqCst) {
+            if CLOSING.load(Ordering::SeqCst) || task.as_mut().is_some_and(|task| task.poll()) {
                 if !notified {
                     let _ = handoff.owner_lost();
                     notified = true;
@@ -54,6 +59,9 @@ pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) ->
                 child.start_kill()?;
             }
             if let Some(status) = child.inner_mut().try_wait()? {
+                if let Some(task) = &mut task {
+                    task.primary(status.code().expect("native process status") as u32)?;
+                }
                 break status;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

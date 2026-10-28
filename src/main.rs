@@ -17,12 +17,13 @@ mod owner;
 mod policy;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
 mod reaper;
+mod task;
 #[cfg(unix)]
 mod terminal;
 #[cfg(windows)]
 mod windows;
 
-const USAGE: &str = "procward 0.1.0\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nNoninteractive development build; interactive Unix job control is not yet supported.";
+const USAGE: &str = "procward 0.1.0\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nUnix terminal jobs use a private PTY; redirected streams retain their destinations.\nTask control: --control-fd <fd> (Unix), --control-handle <handle> (Windows).";
 fn main() -> ExitCode {
     match cli(env::args_os().skip(1).collect()) {
         Ok(code) => {
@@ -56,19 +57,34 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),
         [run, options @ ..] if run == "run" => {
-            let (config, index) = config::options(options)?;
+            let (config, control, index) = config::options(options)?;
             let [command, rest @ ..] = &options[index..] else {
                 return Err((125, "missing command after --".into()));
             };
             if command.is_empty() {
                 return Err((125, "command must not be empty".into()));
             }
+            let mut task = control
+                .map(task::Task::open)
+                .transpose()
+                .map_err(|error| (125, error.to_string()))?;
             #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
-            return owner::run(command, rest, config)
-                .map(u32::from)
-                .map_err(|error| (125, error.to_string()));
+            let result = owner::run(command, rest, config, task.as_mut()).map(u32::from);
             #[cfg(windows)]
-            return windows::run(command, rest, config).map_err(|error| (125, error.to_string()));
+            let result = windows::run(command, rest, config, task.as_mut());
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "macos",
+                windows
+            ))]
+            {
+                if let Some(task) = &mut task {
+                    task.complete(result.is_ok(), config.deadline)
+                        .map_err(|error| (125, error.to_string()))?;
+                }
+                result.map_err(|error| (125, error.to_string()))
+            }
             #[cfg(not(any(
                 target_os = "linux",
                 target_os = "freebsd",

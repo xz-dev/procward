@@ -44,6 +44,8 @@ struct PolicyReader {
     policy: Option<Policy>,
     pause: bool,
     resumed: bool,
+    result: Option<u8>,
+    result_pending: bool,
 }
 impl PolicyReader {
     fn new() -> Self {
@@ -53,10 +55,25 @@ impl PolicyReader {
             policy: None,
             pause: false,
             resumed: false,
+            result: None,
+            result_pending: false,
         }
     }
     fn refresh(&mut self, fd: &OwnedFd, config: Config) -> io::Result<()> {
         loop {
+            if self.result_pending {
+                let mut byte = [0];
+                match rio::read(fd, &mut byte) {
+                    Ok(0) => return Err(io::Error::other("truncated native primary result")),
+                    Err(Errno::AGAIN) => return Ok(()),
+                    Err(Errno::INTR) => continue,
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {
+                        self.result = Some(byte[0]);
+                        self.result_pending = false;
+                    }
+                }
+            }
             if self.filled == 0 {
                 let mut byte = [0];
                 match rio::read(fd, &mut byte) {
@@ -72,32 +89,32 @@ impl PolicyReader {
                         self.resumed = true;
                         continue;
                     }
+                    Ok(_) if byte[0] == b'X' => {
+                        if self.result.is_some() {
+                            return Err(io::Error::other("duplicate native primary result"));
+                        }
+                        self.result_pending = true;
+                        continue;
+                    }
                     Ok(_) => {
+                        if self.policy.is_some() {
+                            return Err(io::Error::other("duplicate native cleanup policy"));
+                        }
                         self.bytes[0] = byte[0];
                         self.filled = 1;
                     }
                 }
             }
-            let mut extra = [0];
-            let target = if self.filled == RECORD_LEN {
-                &mut extra[..]
-            } else {
-                &mut self.bytes[self.filled..]
-            };
-            match rio::read(fd, target) {
-                Ok(0) if self.filled != 0 && self.filled != RECORD_LEN => {
-                    return Err(io::Error::other("truncated native cleanup policy"));
-                }
-                Ok(0) | Err(Errno::AGAIN) => return Ok(()),
+            match rio::read(fd, &mut self.bytes[self.filled..]) {
+                Ok(0) => return Err(io::Error::other("truncated native cleanup policy")),
+                Err(Errno::AGAIN) => return Ok(()),
                 Err(Errno::INTR) => continue,
                 Err(error) => return Err(error.into()),
-                Ok(_) if self.filled == RECORD_LEN => {
-                    return Err(io::Error::other("duplicate native cleanup policy"));
-                }
                 Ok(count) => {
                     self.filled += count;
                     if self.filled == RECORD_LEN {
                         self.policy = Some(Policy::from_record(&self.bytes, config)?);
+                        self.filled = 0;
                     }
                 }
             }
@@ -105,9 +122,14 @@ impl PolicyReader {
     }
 }
 
-pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8> {
+pub fn run(
+    command: &OsStr,
+    args: &[OsString],
+    config: Config,
+    mut task: Option<&mut crate::task::Task>,
+) -> io::Result<u8> {
     crate::reaper::acquire()?;
-    let interactive = crate::terminal::interactive()?;
+    let interactive = task.is_none() && crate::terminal::interactive()?;
     let mut signals = Signals::new([
         SIGCHLD,
         SIGHUP,
@@ -147,16 +169,33 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
             Ok(())
         });
     }
+    anchor.env(
+        "PROCWARD_PRIVATE_TASK",
+        if task.is_some() { "1" } else { "0" },
+    );
     let mut anchor = anchor.spawn()?;
     drop(read);
     drop(publish);
     rio::write(&write, b"R")?;
     let pid = Pid::from_raw(anchor.id() as i32).unwrap();
     let mut policy = PolicyReader::new();
+    let mut cancelled = false;
     #[cfg(target_os = "macos")]
     let mut observed = Inventory::new();
     loop {
         policy.refresh(&notice, config)?;
+        if let Some(task) = &mut task {
+            if let Some(result) = policy.result {
+                task.primary(u32::from(result))?;
+            }
+            if task.poll() && !cancelled {
+                match process::kill_process(pid, Signal::TERM) {
+                    Ok(()) | Err(Errno::SRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                cancelled = true;
+            }
+        }
         if std::mem::take(&mut policy.resumed) {
             let _ = rio::write(&write, b"C");
         }
@@ -170,6 +209,9 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
             drop(write);
             // A final read cannot race a dead writer; published policy survives anchor loss.
             policy.refresh(&notice, config)?;
+            if let (Some(task), Some(result)) = (&mut task, policy.result) {
+                task.primary(u32::from(result))?;
+            }
             let policy = policy
                 .policy
                 .unwrap_or_else(|| Policy::new(config, status.signal().is_some()));

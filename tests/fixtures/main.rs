@@ -19,6 +19,13 @@ mod windows;
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        "task-probe" => {
+            if let Err(error) = managed::task_probe(Path::new(&args[2])) {
+                eprintln!("REJECTED: {error}");
+                process::exit(125);
+            }
+            process::exit(23);
+        }
         "managed-probe" => {
             if let Err(error) = managed::probe(Path::new(&args[2])) {
                 eprintln!("REJECTED: {error}");

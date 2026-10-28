@@ -32,6 +32,7 @@ impl Transport {
             if raw <= 2 {
                 return Err(io::Error::other("invalid lifecycle fd"));
             }
+            rustix::io::fcntl_getfd(unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) })?;
             let file = unsafe { fs::File::from_raw_fd(raw) };
             if rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&file)?.st_mode)
                 != rustix::fs::FileType::Fifo
@@ -282,4 +283,47 @@ pub fn ordinary(raw: &std::ffi::OsStr) {
     }
     println!("ORDINARY-CLEAN");
     process::exit(23);
+}
+
+pub fn task_probe(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use rustix::fd::BorrowedFd;
+        let parent =
+            rustix::process::getppid().ok_or_else(|| io::Error::other("missing task parent"))?;
+        assert_eq!(
+            rustix::process::getsid(None)?,
+            rustix::process::getsid(Some(parent))?,
+            "task must not create a session"
+        );
+        let expected = fs::read_to_string(dir.join("control-identity"))?;
+        for raw in 3..128 {
+            let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+            match rustix::fs::fstat(fd) {
+                Ok(stat) => assert_ne!(
+                    format!("{} {}", stat.st_dev, stat.st_ino),
+                    expected,
+                    "native task control leaked into primary"
+                ),
+                Err(rustix::io::Errno::BADF) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+        let expected = fs::read_to_string(dir.join("control-identity"))?;
+        let fields: Vec<_> = expected.split_whitespace().collect();
+        let raw = fields[0].parse::<usize>().map_err(io::Error::other)?;
+        let mut server = 0;
+        if unsafe { GetNamedPipeServerProcessId(raw as _, &mut server) } != 0 {
+            assert_ne!(
+                server,
+                fields[1].parse::<u32>().unwrap(),
+                "native task control leaked into primary"
+            );
+        }
+    }
+    probe(dir)
 }

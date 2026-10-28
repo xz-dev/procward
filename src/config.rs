@@ -52,14 +52,35 @@ fn duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(millis))
 }
 
-pub fn options(args: &[OsString]) -> Result<(Config, usize), (u8, String)> {
+pub fn options(args: &[OsString]) -> Result<(Config, Option<u64>, usize), (u8, String)> {
     let mut config = Config::default();
+    let mut control = None;
     let mut index = 0;
     let mut seen = 0;
     while let Some(option) = args.get(index) {
         if option == "--" {
             config.validate().map_err(|error| (2, error))?;
-            return Ok((config, index + 1));
+            return Ok((config, control, index + 1));
+        }
+        if option
+            == if cfg!(windows) {
+                "--control-handle"
+            } else {
+                "--control-fd"
+            }
+        {
+            if control.is_some() {
+                return Err((2, "duplicate task control option".into()));
+            }
+            control = Some(
+                args.get(index + 1)
+                    .and_then(|v| v.to_str())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|n| *n > 2)
+                    .ok_or_else(|| (2, "task control needs a native endpoint".into()))?,
+            );
+            index += 2;
+            continue;
         }
         let (field, bit) = if option == "--grace" {
             (&mut config.grace, 1)

@@ -45,7 +45,12 @@ pub fn run_owned(
     config: Config,
 ) -> io::Result<u8> {
     acquire()?;
-    let mut terminal = crate::terminal::Terminal::open()?;
+    let mut terminal =
+        if std::env::var_os("PROCWARD_PRIVATE_TASK").as_deref() == Some(OsStr::new("1")) {
+            None
+        } else {
+            crate::terminal::Terminal::open()?
+        };
     let mut signals = Signals::new([
         SIGCHLD,
         SIGHUP,
@@ -66,6 +71,7 @@ pub fn run_owned(
         payload
     };
     crate::contract::clear(&mut payload);
+    payload.env_remove("PROCWARD_PRIVATE_TASK");
     payload.envs(handoff.environment()?);
     if !crate::owner::alive(lease)? {
         return Err(io::Error::other(
@@ -73,10 +79,8 @@ pub fn run_owned(
         ));
     }
     // No pre_exec on the untrusted command: libc execvp adds an ENOEXEC shell fallback.
-    let child = if let Some(terminal) = &mut terminal {
-        let child = CommandWrap::from(payload).spawn()?;
-        terminal.launched();
-        child
+    let child = if terminal.is_some() {
+        CommandWrap::from(payload).spawn()?
     } else {
         CommandWrap::from(payload)
             .wrap(ProcessGroup::leader())
@@ -116,6 +120,7 @@ pub fn run_owned(
                         .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
                     {
                         result = Some(code as u8);
+                        let _ = rustix::io::write(notice, &[b'X', code as u8]);
                         return Ok(());
                     }
                     // Darwin can return a nonterminal/empty notification with WNOHANG.
@@ -186,7 +191,13 @@ pub fn run_owned(
         None => Ok(()),
     };
     let fatal = observed.is_err() || requested.is_some() || owner_lost;
+    let result_sent = result.is_some();
     cleanup(&mut inventory, Some(primary), &mut result, policy)?;
+    if !result_sent {
+        if let Some(code) = result {
+            let _ = rustix::io::write(notice, &[b'X', code]);
+        }
+    }
     if let Some(terminal) = &mut terminal {
         if !fatal {
             while !terminal.drained() {
@@ -198,6 +209,7 @@ pub fn run_owned(
                     break;
                 }
                 terminal.pump()?;
+                terminal.finish_output()?;
                 thread::sleep(Duration::from_millis(2));
             }
         }

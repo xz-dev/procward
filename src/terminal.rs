@@ -89,8 +89,17 @@ impl Terminal {
         }
         Ok(launch)
     }
-    pub fn launched(&mut self) {
-        self.user.take();
+    pub fn finish_output(&mut self) -> io::Result<()> {
+        if let Some(user) = &self.user {
+            let mut queued: libc::c_int = 0;
+            if unsafe { libc::ioctl(user.as_raw_fd(), libc::TIOCOUTQ, &mut queued) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if queued == 0 && rio::ioctl_fionread(&self.master)? == 0 && self.output.is_empty() {
+                self.user.take();
+            }
+        }
+        Ok(())
     }
     pub fn foreground(&self) -> io::Result<bool> {
         Ok(termios::tcgetpgrp(&self.physical)? == process::getpgrp())
