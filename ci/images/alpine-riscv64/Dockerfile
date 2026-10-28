@@ -1,3 +1,3 @@
-FROM alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN apk add --no-cache python3
