@@ -57,8 +57,16 @@ pub fn run_owned(
         signal_hook::consts::SIGCONT,
     ])?;
     children()?;
-    let mut payload = Command::new(command);
-    payload.args(args);
+    let mut handoff = crate::contract::Handoff::new()?;
+    let mut payload = if let Some(terminal) = &mut terminal {
+        terminal.command(command, args)?
+    } else {
+        let mut payload = Command::new(command);
+        payload.args(args);
+        payload
+    };
+    crate::contract::clear(&mut payload);
+    payload.envs(handoff.environment()?);
     if !crate::owner::alive(lease)? {
         return Err(io::Error::other(
             "owner lost before payload launch permission",
@@ -66,7 +74,7 @@ pub fn run_owned(
     }
     // No pre_exec on the untrusted command: libc execvp adds an ENOEXEC shell fallback.
     let child = if let Some(terminal) = &mut terminal {
-        let child = CommandWrap::from(terminal.command(command, args)?).spawn()?;
+        let child = CommandWrap::from(payload).spawn()?;
         terminal.launched();
         child
     } else {
@@ -75,11 +83,13 @@ pub fn run_owned(
             .spawn()?
     };
     let primary = Pid::from_raw(child.id() as i32).expect("spawn returned a positive PID");
+    let ready = handoff.ready(child.id());
     let mut inventory = Inventory::new();
     let mut result = None;
     let mut requested = None;
     let mut owner_lost = false;
     let mut paused = false;
+    let mut waiting_resume = false;
     let observed = (|| -> io::Result<()> {
         loop {
             if !paused {
@@ -88,7 +98,11 @@ pub fn run_owned(
                 }
             }
             inventory.refresh()?;
-            if !crate::owner::alive(lease)? {
+            let (alive, acknowledged) = crate::owner::lease_state(lease)?;
+            if acknowledged {
+                waiting_resume = false;
+            }
+            if !alive {
                 owner_lost = true;
                 return Ok(());
             }
@@ -138,17 +152,23 @@ pub fn run_owned(
                 if resume && paused {
                     inventory.freeze(false)?;
                     paused = false;
+                    waiting_resume = true;
+                    rustix::io::write(notice, b"R")?;
                 }
                 if stop && !resume && !paused {
                     inventory.freeze(true)?;
                     terminal.restore()?;
                     paused = true;
+                    waiting_resume = false;
                     if rustix::io::write(notice, b"S")? != 1 {
                         return Err(io::Error::other("incomplete native pause acknowledgement"));
                     }
                 }
                 if paused {
                     inventory.freeze(true)?;
+                } else if waiting_resume {
+                    // Own live group anchors identity; repeat until outer acknowledges its STOP returned.
+                    process::kill_process_group(process::getpgrp(), process::Signal::CONT)?;
                 }
             }
             thread::sleep(Duration::from_millis(5));
@@ -156,6 +176,11 @@ pub fn run_owned(
     })();
     let policy = Policy::new(config, false);
     let published = crate::owner::publish(notice, policy);
+    let notified = if owner_lost || requested.is_some() || observed.is_err() {
+        handoff.owner_lost()
+    } else {
+        Ok(())
+    };
     let forwarded = match requested {
         Some(signal) => child.signal(signal),
         None => Ok(()),
@@ -183,6 +208,8 @@ pub fn run_owned(
             return Err(error);
         }
     }
+    ready?;
+    notified?;
     forwarded?;
     observed?;
     if owner_lost {

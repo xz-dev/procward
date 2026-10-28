@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use std::{env, ffi::OsString, process::ExitCode};
 mod config;
+mod contract;
 #[cfg(target_os = "linux")]
 #[path = "linux_inventory.rs"]
 mod inventory;

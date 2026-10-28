@@ -405,6 +405,7 @@ mod tests {
     }
     #[test]
     fn retained_observation_survives_setsid_and_reparenting_but_unseen_escape_is_explicit() {
+        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
         {
             let mut fixture = Fixture::new("observed-tree");
             let worker = fixture.remember("observed-worker");

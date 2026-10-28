@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: BSD-3-Clause
+//! Test-only reference consumer. Applications implement this documented wire contract themselves.
+use std::{
+    env, fs,
+    io::{self, Read},
+    path::Path,
+    process::{self, Command},
+    thread,
+    time::{Duration, Instant},
+};
+const ENV: [&str; 6] = [
+    "PROCWARD_PROTOCOL",
+    "PROCWARD_OWNER_PID",
+    "PROCWARD_LIFECYCLE_FD",
+    "PROCWARD_LIFECYCLE_HANDLE",
+    "PROCWARD_CONTRACT_ID",
+    "PROCWARD_PRIMARY_PID",
+];
+struct Transport {
+    file: fs::File,
+    buffered: Vec<u8>,
+}
+impl Transport {
+    fn open() -> io::Result<(Self, String)> {
+        #[cfg(unix)]
+        let (file, raw) = {
+            use std::os::fd::FromRawFd;
+            let raw = env::var("PROCWARD_LIFECYCLE_FD")
+                .map_err(io::Error::other)?
+                .parse::<i32>()
+                .map_err(io::Error::other)?;
+            if raw <= 2 {
+                return Err(io::Error::other("invalid lifecycle fd"));
+            }
+            let file = unsafe { fs::File::from_raw_fd(raw) };
+            if rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&file)?.st_mode)
+                != rustix::fs::FileType::Fifo
+            {
+                return Err(io::Error::other("lifecycle fd is not a pipe"));
+            }
+            rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::CLOEXEC)?;
+            rustix::fs::fcntl_setfl(&file, rustix::fs::OFlags::NONBLOCK)?;
+            (file, raw.to_string())
+        };
+        #[cfg(windows)]
+        let (file, raw) = {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+            let raw = env::var("PROCWARD_LIFECYCLE_HANDLE")
+                .map_err(io::Error::other)?
+                .parse::<usize>()
+                .map_err(io::Error::other)?;
+            if raw == 0 || unsafe { SetHandleInformation(raw as _, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            (
+                unsafe { fs::File::from_raw_handle(raw as _) },
+                raw.to_string(),
+            )
+        };
+        Ok((
+            Self {
+                file,
+                buffered: Vec::new(),
+            },
+            raw,
+        ))
+    }
+    fn line(&mut self, deadline: Instant) -> io::Result<Option<String>> {
+        loop {
+            if let Some(end) = self.buffered.iter().position(|b| *b == b'\n') {
+                if end + 1 > 256 {
+                    return Err(io::Error::other("oversized lifecycle record"));
+                }
+                let record: Vec<_> = self.buffered.drain(..=end).collect();
+                return String::from_utf8(record)
+                    .map(Some)
+                    .map_err(io::Error::other);
+            }
+            if self.buffered.len() >= 256 {
+                return Err(io::Error::other("oversized lifecycle record"));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "lifecycle response deadline",
+                ));
+            }
+            let mut bytes = [0; 257];
+            match self.read(&mut bytes) {
+                Ok(0) if self.buffered.is_empty() => return Ok(None),
+                Ok(0) => return Err(io::Error::other("truncated lifecycle record")),
+                Ok(count) => self.buffered.extend_from_slice(&bytes[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(2))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    #[cfg(unix)]
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.file.read(bytes)
+    }
+    #[cfg(windows)]
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{Foundation::ERROR_BROKEN_PIPE, System::Pipes::PeekNamedPipe};
+        let mut available = 0;
+        if unsafe {
+            PeekNamedPipe(
+                self.file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+                Ok(0)
+            } else {
+                Err(error)
+            };
+        }
+        if available == 0 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let size = bytes.len().min(available as usize);
+        self.file.read(&mut bytes[..size])
+    }
+}
+
+#[cfg(unix)]
+fn parent_matches(owner: u32, identity: &str) -> io::Result<bool> {
+    Ok(identity == "parent"
+        && rustix::process::getppid().is_some_and(|pid| pid.as_raw_nonzero().get() as u32 == owner))
+}
+#[cfg(windows)]
+fn parent_matches(owner: u32, identity: &str) -> io::Result<bool> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, INVALID_HANDLE_VALUE, WAIT_TIMEOUT},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            },
+        },
+    };
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of_val(&entry) as u32;
+    if unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    loop {
+        if entry.th32ProcessID == process::id() {
+            break;
+        }
+        if unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if entry.th32ParentProcessID != owner {
+        return Ok(false);
+    }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            owner,
+        )
+    };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut times: [FILETIME; 4] = unsafe { std::mem::zeroed() };
+    if unsafe {
+        GetProcessTimes(
+            handle.as_raw_handle(),
+            &mut times[0],
+            &mut times[1],
+            &mut times[2],
+            &mut times[3],
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let birth = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
+    Ok(format!("{birth:016x}") == identity
+        && unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == WAIT_TIMEOUT)
+}
+
+pub fn probe(dir: &Path) -> io::Result<()> {
+    if env::var("PROCWARD_PROTOCOL").ok().as_deref() != Some("1") {
+        return Err(io::Error::other("unsupported or absent managed protocol"));
+    }
+    let owner = env::var("PROCWARD_OWNER_PID")
+        .map_err(io::Error::other)?
+        .parse::<u32>()
+        .map_err(io::Error::other)?;
+    let id = env::var("PROCWARD_CONTRACT_ID").map_err(io::Error::other)?;
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::other("invalid managed launch id"));
+    }
+    let (mut transport, raw) = Transport::open()?;
+    let record = transport
+        .line(Instant::now() + Duration::from_secs(2))?
+        .ok_or_else(|| io::Error::other("EOF before readiness"))?;
+    let fields: Vec<_> = record.split_whitespace().collect();
+    if fields.len() != 6
+        || fields[0..2] != ["PROCWARD/1", "READY"]
+        || fields[2] != owner.to_string()
+        || fields[3] != process::id().to_string()
+        || fields[5] != id
+        || !parent_matches(owner, fields[4])?
+    {
+        return Err(io::Error::other("stale or mismatched managed readiness"));
+    }
+    // Same unset-and-close-on-exec discipline as socket activation: consume before spawning.
+    for name in ENV {
+        unsafe {
+            env::remove_var(name);
+        }
+    }
+    let status = Command::new(env::current_exe()?)
+        .arg("managed-ordinary")
+        .arg(&raw)
+        .status()?;
+    if status.code() != Some(23) {
+        return Err(io::Error::other(
+            "ordinary child inherited managed claim/endpoint",
+        ));
+    }
+    fs::write(dir.join("accepted"), b"ready")?;
+    println!("MANAGED {owner} {} {id}", process::id());
+    Ok(())
+}
+
+pub fn ordinary(raw: &std::ffi::OsStr) {
+    assert!(
+        ENV.iter().all(|name| env::var_os(name).is_none()),
+        "reusable claim leaked"
+    );
+    #[cfg(unix)]
+    {
+        use rustix::fd::BorrowedFd;
+        let raw = raw.to_str().unwrap().parse::<i32>().unwrap();
+        assert_eq!(
+            rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(raw) }),
+            Err(rustix::io::Errno::BADF),
+            "application endpoint leaked"
+        );
+    }
+    #[cfg(windows)]
+    {
+        let raw = raw.to_str().unwrap().parse::<usize>().unwrap();
+        let mut flags = 0;
+        assert_eq!(
+            unsafe { windows_sys::Win32::Foundation::GetHandleInformation(raw as _, &mut flags) },
+            0,
+            "application endpoint leaked"
+        );
+    }
+    println!("ORDINARY-CLEAN");
+    process::exit(23);
+}

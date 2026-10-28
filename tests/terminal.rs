@@ -344,7 +344,15 @@ fn fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authori
 }
 
 fn absent(pid: &str) -> bool {
-    match process::test_kill_process(Pid::from_raw(pid.parse().unwrap()).unwrap()) {
+    let target = Pid::from_raw(pid.parse().unwrap()).unwrap();
+    match process::waitpid(Some(target), process::WaitOptions::NOHANG) {
+        Ok(Some((_, status))) => {
+            assert!(status.exit_status().is_some() || status.terminating_signal().is_some())
+        }
+        Ok(None) | Err(Errno::CHILD | Errno::INTR) => {}
+        Err(error) => panic!("owned-child wait failed: {error}"),
+    }
+    match process::test_kill_process(target) {
         Err(Errno::SRCH) => true,
         Ok(()) => false,
         Err(error) => panic!("liveness query failed: {error}"),

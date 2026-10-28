@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+pub(crate) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     #[cfg(not(target_os = "macos"))]
     return Ok(rustix::pipe::pipe_with(
         rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
@@ -43,6 +43,7 @@ struct PolicyReader {
     filled: usize,
     policy: Option<Policy>,
     pause: bool,
+    resumed: bool,
 }
 impl PolicyReader {
     fn new() -> Self {
@@ -51,6 +52,7 @@ impl PolicyReader {
             filled: 0,
             policy: None,
             pause: false,
+            resumed: false,
         }
     }
     fn refresh(&mut self, fd: &OwnedFd, config: Config) -> io::Result<()> {
@@ -63,6 +65,11 @@ impl PolicyReader {
                     Err(error) => return Err(error.into()),
                     Ok(_) if byte[0] == b'S' => {
                         self.pause = true;
+                        continue;
+                    }
+                    Ok(_) if byte[0] == b'R' => {
+                        self.pause = false;
+                        self.resumed = true;
                         continue;
                     }
                     Ok(_) => {
@@ -150,8 +157,12 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
     let mut observed = Inventory::new();
     loop {
         policy.refresh(&notice, config)?;
+        if std::mem::take(&mut policy.resumed) {
+            let _ = rio::write(&write, b"C");
+        }
         if std::mem::take(&mut policy.pause) && policy.policy.is_none() {
             process::kill_process(process::getpid(), Signal::STOP)?;
+            let _ = rio::write(&write, b"C");
         }
         #[cfg(target_os = "macos")]
         observed.refresh()?;
@@ -308,10 +319,14 @@ pub fn publish(fd: &OwnedFd, policy: Policy) -> io::Result<()> {
     }
 }
 pub fn alive(lease: impl rustix::fd::AsFd) -> io::Result<bool> {
+    Ok(lease_state(lease)?.0)
+}
+pub fn lease_state(lease: impl rustix::fd::AsFd) -> io::Result<(bool, bool)> {
     let mut byte = [0];
     match rio::read(lease, &mut byte) {
-        Ok(0) => Ok(false),
-        Err(Errno::AGAIN | Errno::INTR) => Ok(true),
+        Ok(0) => Ok((false, false)),
+        Err(Errno::AGAIN | Errno::INTR) => Ok((true, false)),
+        Ok(_) if byte[0] == b'C' => Ok((true, true)),
         Ok(_) => Err(io::Error::other("unexpected native lease data")),
         Err(error) => Err(error.into()),
     }
@@ -320,8 +335,10 @@ pub fn alive(lease: impl rustix::fd::AsFd) -> io::Result<bool> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    pub(crate) static PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[test]
     fn native_endpoints_have_required_access_and_reject_regular_files() {
+        let _guard = PROCESS_LOCK.lock().unwrap();
         use rustix::fd::AsFd;
         let (read, write) = pipe().unwrap();
         validate_endpoint(read.as_fd(), rustix::fs::OFlags::RDONLY).unwrap();
@@ -338,6 +355,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn policy_transport_preserves_one_record_and_refuses_partial_or_duplicate_records() {
+        let _guard = PROCESS_LOCK.lock().unwrap();
         let config = Config::default();
         let policy = Policy::new(config, false);
         let (read, write) = pipe().unwrap();

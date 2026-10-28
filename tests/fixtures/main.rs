@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod managed;
 #[cfg(unix)]
 mod terminal;
 #[cfg(windows)]
@@ -18,6 +19,14 @@ mod windows;
 fn main() {
     let args: Vec<_> = env::args_os().collect();
     match args[1].to_str().unwrap() {
+        "managed-probe" => {
+            if let Err(error) = managed::probe(Path::new(&args[2])) {
+                eprintln!("REJECTED: {error}");
+                process::exit(125);
+            }
+            process::exit(23);
+        }
+        "managed-ordinary" => managed::ordinary(&args[2]),
         #[cfg(unix)]
         "terminal-host" => terminal::host(&args[2], &args[3], Path::new(&args[4])),
         #[cfg(unix)]

@@ -29,15 +29,28 @@ pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) ->
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
+        let mut handoff = crate::contract::Handoff::new()?;
         let mut command = tokio::process::Command::new(command);
         command.args(args);
+        crate::contract::clear(command.as_std_mut());
+        command.envs(handoff.environment()?);
         let mut child = CommandWrap::from(command)
             .wrap(KillOnDrop)
             .wrap(JobObject)
             .spawn()?;
+        let ready = handoff.ready(
+            child
+                .id()
+                .ok_or_else(|| io::Error::other("primary PID missing"))?,
+        );
+        let mut notified = false;
         // JobObject::wait waits for the entire Job; observe only its immediate inner primary first.
         let status = loop {
             if CLOSING.load(Ordering::SeqCst) {
+                if !notified {
+                    let _ = handoff.owner_lost();
+                    notified = true;
+                }
                 child.start_kill()?;
             }
             if let Some(status) = child.inner_mut().try_wait()? {
@@ -49,6 +62,7 @@ pub fn run(command: &OsStr, args: &[OsString], config: crate::config::Config) ->
         tokio::time::timeout(config.deadline, child.wait())
             .await
             .map_err(|_| io::Error::other("Job completion deadline expired"))??;
+        ready?;
         Ok(status
             .code()
             .expect("Windows process has a native exit code") as u32)
