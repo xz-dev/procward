@@ -147,9 +147,7 @@ impl Identity {
             now.pbi_svuid,
         )
     }
-    fn kill(&self) {
-        #[cfg(target_os = "linux")]
-        rustix::process::pidfd_send_signal(&self.fd, rustix::process::Signal::KILL).unwrap();
+    fn kill(&self) -> Instant {
         #[cfg(target_os = "freebsd")]
         {
             use rustix::process::{self, IdType, PidInfoFlags};
@@ -170,16 +168,18 @@ impl Identity {
                     .any(|pid| pid.as_raw_nonzero().get() as u32 == self.pid),
                 "target left test's nested reaper subtree"
             );
-            rustix::process::kill_process(
-                rustix::process::Pid::from_raw(self.pid as i32).unwrap(),
-                rustix::process::Signal::KILL,
-            )
-            .unwrap();
         }
         #[cfg(target_os = "macos")]
         {
             let now = libproc::proc_pid::pidinfo(self.pid as i32, 0).unwrap();
             assert!(self.same(&now), "nested identity changed before signal");
+        }
+        // Identity checks precede injection; the unchanged bound starts at the actual kill.
+        let fault = Instant::now();
+        #[cfg(target_os = "linux")]
+        rustix::process::pidfd_send_signal(&self.fd, rustix::process::Signal::KILL).unwrap();
+        #[cfg(any(target_os = "freebsd", target_os = "macos"))]
+        {
             rustix::process::kill_process(
                 rustix::process::Pid::from_raw(self.pid as i32).unwrap(),
                 rustix::process::Signal::KILL,
@@ -199,6 +199,7 @@ impl Identity {
                 0
             );
         }
+        fault
     }
 }
 struct Run {
@@ -414,19 +415,20 @@ fn nested_layers_preserve_status_and_clean_on_each_owner_loss() {
     for mode in ["exit", "outer-loss", "inner-loss"] {
         let mut run = Run::start(mode, "nested-tree");
         let inner = run.ready();
-        let fault = Instant::now();
-        let expected = match mode {
+        let (fault, expected) = match mode {
             "exit" => {
+                let fault = Instant::now();
                 run.child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
-                23
+                (fault, 23)
             }
             "outer-loss" => {
+                let fault = Instant::now();
                 run.child.kill().unwrap();
-                1
+                (fault, 1)
             }
             "inner-loss" => {
-                run.targets.iter().find(|p| p.pid == inner).unwrap().kill();
-                if cfg!(windows) { 71 } else { 137 }
+                let fault = run.targets.iter().find(|p| p.pid == inner).unwrap().kill();
+                (fault, if cfg!(windows) { 71 } else { 137 })
             }
             _ => unreachable!(),
         };

@@ -51,7 +51,7 @@ pub fn open() -> io::Result<Vec<usize>> {
 #[cfg(windows)]
 pub fn open() -> io::Result<Vec<usize>> {
     use windows_sys::Win32::{
-        Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
+        Foundation::{CompareObjectHandles, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
         Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
         System::{
             Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
@@ -92,7 +92,11 @@ pub fn open() -> io::Result<Vec<usize>> {
             if result != ERROR_SUCCESS {
                 break Err(io::Error::from_raw_os_error(result as i32));
             }
-            if !stdio.contains(&entry.Handle) && GetFileType(entry.Handle) == FILE_TYPE_PIPE {
+            // Rust duplicates inherited stdio at each spawn; compare objects, not HANDLE numbers.
+            let is_stdio = stdio
+                .iter()
+                .any(|standard| CompareObjectHandles(entry.Handle, *standard) != 0);
+            if !is_stdio && GetFileType(entry.Handle) == FILE_TYPE_PIPE {
                 pipes.push(entry.Handle as usize);
             }
         };
