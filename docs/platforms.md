@@ -27,6 +27,42 @@ its own destructor or terminal cleanup. Standard crates do not remove those OS
 limits. Unavailable or denied queries are errors, never evidence of absence.
 Stopped work is alive; zombies are not reaped completion.
 
+## Nested ownership
+
+`procward run -- procward run -- command` is supported without a no-nesting
+detection mode. Both layers preserve the payload result on normal completion.
+Outer-owner loss cleans the whole nested tree under the outer configured
+deadline; inner-owner loss cleans the inner subtree and the outer layer reports
+its primary's native termination result. The inner payload gets a fresh contract,
+not the outer layer's environment or lifecycle endpoint. See
+[contract.md](contract.md#nested-scopes) for consumer/bootstrap rules.
+
+- **Linux:** a subreaper can run below another subreaper. Inner reaping stays
+  local while healthy; on loss, ancestor reapers adopt and clean remaining work.
+  Nesting tests include a detached branch and stopped, TERM-ignoring worker.
+- **FreeBSD:** each layer acquires its own reaper domain. Cleanup includes nested
+  reapers, not only ordinary direct children. The nested fixture also acquires a
+  reaper for its detached branch and checks stopped work as live.
+- **Windows:** each procward creates a kill-on-close Job inside the enclosing
+  Job hierarchy, without requesting breakaway. The outer Job contains the inner
+  controller and its Job's processes. Tests kill the outer controller and require
+  all retained inner process handles to signal, proving outer kill-on-close
+  terminates the nested Job's work; inner-controller termination must also clean
+  its subtree and preserve its native status through the outer layer. Assignment
+  failure remains a visible startup error, never an unmanaged fallback.
+- **macOS:** two nested observers retain separate inventories; neither supplies
+  kernel containment. The CLI fixture uses an attached, gated tree rather than
+  asserting cleanup of a pre-observation setsid/reparent escape. Both existing
+  best-effort/identity-query limits and all-independent-role-loss exclusions
+  still apply. A fixture readiness marker alone is not proof of observation.
+
+All twelve CI rows run these scenarios. Fault checks use an outer 2s ordinary
+/ 1s fatal / 2500ms deadline against the inner default 6s / 3s / 7500ms policy;
+Unix's ignoring worker proves the inner policy cannot extend outer cleanup.
+Normal exit allows the inner ordinary grace to finish before the outer primary
+exits. Riscv64 qemu-user keeps the same assertions and deadlines; only a matching
+runtime capability probe may label an affected case EMULATOR-UNSUPPORTED.
+
 ## riscv64 execution and release scope
 
 Required additional targets: `riscv64gc-unknown-linux-gnu` and

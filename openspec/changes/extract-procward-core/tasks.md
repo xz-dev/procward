@@ -35,7 +35,7 @@
 
 - [x] 4.7 Amend the pi contract/proposal/design/7.2: pi under pi or external procward adds its own layer; only launcher flag/environment opt-out disables it; only pi's private one-shot bootstrap marker plus valid READY skips that bootstrap's wrapping. Validate OpenSpec strictly.
 - [ ] 4.8 Run `procward run -- procward run -- <fixture tree>` on all 12 rows: preserve both layers' payload result and clean descendants on primary exit; clean the whole nested tree within the outer configured deadline on outer-owner loss; clean the inner subtree and report the correct outer result on inner-owner loss; expose only inner contract metadata and no outer fd/HANDLE. Keep macOS best-effort limits and probe-only qemu-user exceptions explicit; fix product defects without weakening assertions.
-- [ ] 4.9 Document default nesting and backend-specific nested ownership in `docs/contract.md` and `docs/platforms.md`.
+- [x] 4.9 Document default nesting and backend-specific nested ownership in `docs/contract.md` and `docs/platforms.md`.
 
 ## 5. Finish documentation/release setup and get one independent review
 

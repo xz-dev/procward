@@ -77,6 +77,46 @@ identity differ, and a pipe's consumed READY cannot be rewound. This is a
 lifecycle convention, not a security boundary against a malicious parent or
 application forging its own state.
 
+## Nested scopes
+
+Nesting is supported by default:
+
+```sh
+procward run -- procward run -- command args
+```
+
+Each invocation creates its own ownership layer; an existing procward tree or
+READY record does not suppress it. Normal payload exit preserves its native
+result through both layers, after cleanup. Losing the outer owner cleans the
+whole nested tree within the **outer** configured cleanup deadline, even if the
+inner layer has a longer grace. Losing only the inner owner cleans its subtree;
+the outer layer returns its primary's native termination result after cleanup
+(for example 137 for Unix SIGKILL). macOS retains its observed-tree best-effort
+boundary; nesting does not turn either observer into kernel containment.
+
+A nested procward discards its inherited application lifecycle endpoint before
+creating native roles or its own handoff. It validates the incoming endpoint's
+pipe type (and Unix access), refuses malformed/invalid endpoints before payload
+work, and never interprets inherited metadata as permission to skip ownership.
+It replaces all contract variables, including obsolete/wrong-platform ones, with
+the inner layer's environment and fresh launch ID. The inner payload receives
+only its inner lifecycle fd/HANDLE and READY record, never the outer endpoint or
+private native ownership handles. Consumers must still follow the ordinary-child
+unset/close-on-exec discipline above.
+
+Pi's later adapter follows the same default: pi under pi or any external
+procward adds its own layer. Only its launcher's `--no-process-ownership` or
+`PI_NO_PROCESS_OWNERSHIP=1` disables that pi-added layer, without escaping an
+external scope. Pi skips only its **own** bootstrap reentry, identified by a
+private one-shot marker **and** valid READY; external PROCWARD metadata alone is
+not that marker. This is an integration requirement, not implemented pi code in
+this repository.
+
+`tests/nesting.rs` exercises payload exit, each owner loss and contract isolation
+through the real nested CLI on every matrix target. The isolation fixture checks
+all open Unix descriptors or snapshots all Windows handles, rather than assuming
+unused handle numbers prove noninheritance.
+
 ## Owner loss and shutdown
 
 The surviving native owner queues OWNER-LOSS before starting its termination
