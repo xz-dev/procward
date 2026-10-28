@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Build size-first distributions; measure startup without making it a gate."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -115,11 +116,19 @@ def package(binary, target, debug, output):
     return archive.stat().st_size
 
 
+def tested_measurement(binary, output):
+    report = json.loads((output / "measurements.json").read_text())
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != report["dist_sha256"]:
+        raise RuntimeError("dist binary changed between measurement, fixtures and packaging")
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target")
-    parser.add_argument("--measure", action="store_true", help="compare opt-level 2/3/s/z, then rebuild smallest")
-    parser.add_argument("--package", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--measure", action="store_true", help="compare opt-level 2/3/s/z, then rebuild smallest")
+    mode.add_argument("--package", action="store_true", help="package previously measured binary after fixtures pass")
     parser.add_argument("--runner", default="")
     args = parser.parse_args()
     target = args.target
@@ -127,18 +136,24 @@ def main():
     root = Path("target") / target
     binary = root / "dist" / ("procward" + extension)
     env = os.environ.copy()
-    candidates = ["2", "3", "s", "z"] if args.measure else [env.get("CARGO_PROFILE_DIST_OPT_LEVEL", "z")]
-    rows = []
-    for level in candidates:
-        env["CARGO_PROFILE_DIST_OPT_LEVEL"] = level
-        run("cargo", "build", "--locked", "--profile", "dist", "--target", target, "--bin", "procward", env=env)
-        rows.append({"opt_level": level, "bytes": binary.stat().st_size, "startup_median_ms": round(startup(binary, args.runner), 3)})
-    chosen = min(rows, key=lambda row: row["bytes"])["opt_level"]
-    env["CARGO_PROFILE_DIST_OPT_LEVEL"] = chosen
-    run("cargo", "build", "--locked", "--profile", "dist", "--target", target, "--bins", "--examples", env=env)
     output = Path("artifacts") / target
     output.mkdir(parents=True, exist_ok=True)
-    report = {"target": target, "selected_opt_level": chosen, "measurements": rows, "startup": "21 warm-cache --version process launches after 3 warmups; informational"}
+    if args.package:
+        report = tested_measurement(binary, output)
+        rows = report["measurements"]
+        chosen = report["selected_opt_level"]
+        env["CARGO_PROFILE_DIST_OPT_LEVEL"] = chosen
+    else:
+        candidates = ["2", "3", "s", "z"] if args.measure else [env.get("CARGO_PROFILE_DIST_OPT_LEVEL", "z")]
+        rows = []
+        for level in candidates:
+            env["CARGO_PROFILE_DIST_OPT_LEVEL"] = level
+            run("cargo", "build", "--locked", "--profile", "dist", "--target", target, "--bin", "procward", env=env)
+            rows.append({"opt_level": level, "bytes": binary.stat().st_size, "startup_median_ms": round(startup(binary, args.runner), 3)})
+        chosen = min(rows, key=lambda row: row["bytes"])["opt_level"]
+        env["CARGO_PROFILE_DIST_OPT_LEVEL"] = chosen
+        run("cargo", "build", "--locked", "--profile", "dist", "--target", target, "--bins", "--examples", env=env)
+        report = {"target": target, "selected_opt_level": chosen, "measurements": rows, "dist_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "startup": "21 warm-cache --version process launches after 3 warmups; informational"}
     dependency_report = dependencies(binary, target)
     if args.package:
         report["release_zip_bytes"] = package(binary, target, False, output)

@@ -46,11 +46,14 @@ jobs:
           rustup update stable --no-self-update
           rustc -vV
           test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
-      - name: Measure, choose smallest, freeze release and debug packages
+      - name: Measure and build smallest distribution
         shell: bash
-        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure
       - name: Full suite against dist binaries
         run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+      - name: Freeze release and debug packages only after fixtures pass
+        shell: bash
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.target }}
@@ -81,10 +84,12 @@ jobs:
             echo "CARGO_TARGET_${{ matrix.key }}_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld"
             echo 'CARGO_TARGET_${{ matrix.key }}_RUNNER=bash .github/scripts/run-musl.sh'
           } >> "$GITHUB_ENV"
-      - name: Measure, choose smallest, freeze release and debug packages
-        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package --runner 'bash .github/scripts/run-musl.sh'
+      - name: Measure and build smallest static distribution
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-musl.sh'
       - name: Full suite against static dist binaries in native musl container
         run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+      - name: Freeze release and debug packages only after fixtures pass
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package --runner 'bash .github/scripts/run-musl.sh'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.target }}
@@ -117,9 +122,10 @@ jobs:
             rustc -vV
             test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
             unset GITHUB_STEP_SUMMARY GITHUB_ENV
-            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package
+            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}' --measure
             export CARGO_PROFILE_DIST_OPT_LEVEL=$(cat 'artifacts/${{ matrix.target }}/opt-level')
             cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}' --package
             # Return only frozen products, not a VM-sized target directory.
             rm -rf target
       - name: Guest size and startup summary
@@ -173,9 +179,9 @@ jobs:
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
           docker run --rm --platform linux/riscv64 '${{ matrix.image }}' uname -m
-      - name: Measure, choose smallest, freeze release and debug packages
+      - name: Measure and build smallest emulated distribution
         run: |
-          python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package --runner 'bash .github/scripts/run-riscv64.sh'
+          python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-riscv64.sh'
           file 'target/${{ matrix.target }}/dist/procward'
           readelf -h 'target/${{ matrix.target }}/dist/procward' | grep 'Machine:.*RISC-V'
       - name: Full suite against emulated dist binaries
@@ -183,6 +189,8 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
+      - name: Freeze release and debug packages only after fixtures pass
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package --runner 'bash .github/scripts/run-riscv64.sh'
       - name: Count and list emulator-unsupported cases
         if: always()
         run: python3 .github/scripts/emulation-summary.py '${{ matrix.target }}' '${{ steps.fixtures.outcome }}' "$RUNNER_TEMP/riscv-fixtures.log"

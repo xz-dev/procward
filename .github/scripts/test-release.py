@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """External release boundaries: tag eligibility, missing targets, tampered bytes."""
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -27,6 +29,18 @@ class ReleaseTests(unittest.TestCase):
             release.eligible("pull_request", "refs/tags/v0.1.0", "0.1.0")
         # A dispatch on a real release tag still cannot sign or publish.
         self.assertFalse(release.eligible("workflow_dispatch", "refs/tags/v0.1.0", "0.1.0"))
+
+    def test_packaging_requires_unchanged_measured_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            binary = output / "procward"
+            binary.write_bytes(b"measured executable")
+            report = {"dist_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}
+            (output / "measurements.json").write_text(json.dumps(report))
+            self.assertEqual(dist.tested_measurement(binary, output), report)
+            binary.write_bytes(b"rebuilt or changed executable")
+            with self.assertRaisesRegex(RuntimeError, "binary changed"):
+                dist.tested_measurement(binary, output)
 
     def test_all_targets_and_frozen_embedded_bytes_required(self):
         with tempfile.TemporaryDirectory() as directory:
