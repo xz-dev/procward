@@ -143,7 +143,15 @@ server PPID 1, no installed pi subreaper ancestor):
 | Repeated teardown CONT (`11cab0a`) | `cargo test --locked --test cli early_anchor_loss_does_not_repeat_teardown_cont_for_adopted_identity -- --nocapture`; `cont-red.log` / `cont-green.log` | Before fix: `true 2`, expected `true 1`. After fix: count one, status 125, no survivors within original 2500ms deadline. FreeBSD also exercises early loss with its existing order fixture. |
 
 After these fixes, local `cargo test --locked --all-targets -- --nocapture`
-passed 55 applicable Linux tests (zero failures/ignored). Full build, clippy
+passed 55 applicable Linux tests (zero failures/ignored). The direct read fixture
+was subsequently narrowed to a single-threaded post-fork syscall child, matching
+the relay instead of depending on libtest's process-directed signal routing.
+The original threaded reader timed out in both Darwin CI rows in run
+`40698997567`; no product assertion/deadline was relaxed. The revised fixture
+also fails with SIGTTIN SA_RESTART deliberately restored
+(`ttin-portable-red.log`, 2s read-return deadline), then passes with the handler
+fixed (`ttin-portable-green.log`), including checks for both TTIN/TTOU flags.
+Full build, clippy
 `-D warnings`, formatting, strict OpenSpec validation and three release-safety
 regressions passed. This local result does not replace the required twelve-row
 ordinary CI or independent review approval. No tags, releases, repository settings
