@@ -16,7 +16,11 @@ Procward SHALL support `procward run [options] -- <cmd> [args...]`, execute argv
 - **THEN** the tree is cleaned up within the teardown bound without requiring `fg` or cooperation from the command
 
 ### Requirement: Support nested ownership
-`procward run` inside another procward-managed tree SHALL add an independent ownership layer by default. Both layers SHALL preserve the payload result after successful cleanup. Outer-owner loss SHALL clean the whole nested tree within the outer configured deadline, and inner-owner loss SHALL clean the inner subtree while the outer layer reports its primary's native result. The inner payload SHALL receive only the inner contract metadata and SHALL NOT inherit the outer lifecycle fd/HANDLE. macOS SHALL retain its documented observed-tree best-effort boundary rather than claim kernel containment.
+`procward run` inside another procward-managed tree SHALL add an independent ownership layer by default. Both layers SHALL preserve the payload result after successful cleanup. Outer-owner loss SHALL clean the whole nested tree within the outer configured deadline, and inner-owner loss SHALL clean the inner subtree while the outer layer reports its primary's native result. The inner payload SHALL receive only the inner contract metadata and SHALL NOT inherit the outer lifecycle fd/HANDLE. macOS SHALL retain its documented observed-tree best-effort boundary rather than claim kernel containment. Stale, closed or mismatched inherited application metadata SHALL NOT authorize managed state or prevent a fresh ownership layer. Explicit native/task endpoints and a consumer accepting its own READY SHALL remain strictly validated.
+
+#### Scenario: Ordinary intermediary closes inherited descriptors
+- **WHEN** a shell or Python subprocess launches an inner procward while retaining stale outer application metadata
+- **THEN** the inner procward establishes fresh ownership, cleans its tree, and supplies only its own contract to its payload
 
 #### Scenario: Nested payload exits
 - **WHEN** `procward run -- procward run -- <fixture tree>` has a payload that exits 23 with descendants still running
@@ -35,7 +39,7 @@ Procward SHALL support `procward run [options] -- <cmd> [args...]`, execute argv
 - **THEN** owner identity, launch ID and transport refer only to the inner layer and no outer lifecycle endpoint is inherited
 
 ### Requirement: Preserve inputs and fail startup safely
-Procward SHALL preserve argument boundaries, cwd, environment and stdio destinations except for the documented managed handoff and necessary terminal isolation. Invalid options, missing commands, invalid inherited endpoints or required ownership setup failure SHALL fail visibly before payload side effects, without silently launching unmanaged.
+Procward SHALL preserve argument boundaries, cwd, environment and stdio destinations except for the documented managed handoff and necessary terminal isolation. Invalid options, missing commands, invalid explicit native/task endpoints or required ownership setup failure SHALL fail visibly before payload side effects, without silently launching unmanaged.
 
 #### Scenario: Argument contains spaces and option-like text
 - **WHEN** `procward run -- <fixture> "two words" --literal` runs with stderr redirected

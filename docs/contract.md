@@ -95,9 +95,13 @@ the outer layer returns its primary's native termination result after cleanup
 boundary; nesting does not turn either observer into kernel containment.
 
 A nested procward discards its inherited application lifecycle endpoint before
-creating native roles or its own handoff. It validates the incoming endpoint's
-pipe type (and Unix access), refuses malformed/invalid endpoints before payload
-work, and never interprets inherited metadata as permission to skip ownership.
+creating native roles or its own handoff. It closes an incoming pipe only after
+checking its type (and Unix access), ignores stale/closed/malformed or mismatched
+application metadata, and never interprets that metadata as permission to skip
+ownership. Ordinary intermediaries such as Python subprocess and shells can
+close inherited descriptors without scrubbing their environment; nesting still
+adds a fresh layer. Strict validation remains required for explicitly supplied
+native/task endpoints and for a consumer accepting its own READY.
 It replaces all contract variables, including obsolete/wrong-platform ones, with
 the inner layer's environment and fresh launch ID. The inner payload receives
 only its inner lifecycle fd/HANDLE and READY record, never the outer endpoint or

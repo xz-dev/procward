@@ -280,8 +280,9 @@ an attached tree and retains the documented best-effort observation boundary.
 The fixtures found one product defect: an incoming lifecycle endpoint survived
 into the nested payload even though its environment had been replaced.
 `c207383` discards that endpoint before native roles/new handoff setup, reusing
-Unix pipe/access validation and checking Windows pipe handles. Invalid incoming
-transports fail before payload side effects. The first red test saw outer fd 6;
+Unix pipe/access validation and checking Windows pipe handles. Stale application
+metadata is discarded rather than accepted as managed authority; explicit
+native/task endpoints and consumer READY validation remain fail-closed. The first red test saw outer fd 6;
 a later negative control, omitting the discard after caller-hygiene fixes, still
 failed with pipes `[6, 7]` instead of only inner `[7]`. Restored code passed.
 
@@ -334,7 +335,7 @@ diagnostics, plus an existing riscv64 GNU terminal fixture failure), and
 `40676790053` (stdio alias diagnostics before final caller serialization).
 No old failure was relabelled as a product pass or erased.
 
-Final local Linux suite: **48 passed**, run in a task-owned tmux session outside
+Final checkpoint local Linux suite: **48 passed**, run in a task-owned tmux session outside
 the installed pi subreaper as described above. Native clippy `-D warnings`,
 formatting, Rust 1.87 all-target checks, Windows/FreeBSD all-target cross-checks
 and strict OpenSpec validation passed. Optional strict Windows clippy still
@@ -347,3 +348,23 @@ Tasks 4.7–4.9 are complete. Independent pre-tag review (5.5), owner-controlled
 release prerequisites/publication (6), pi integration (7), and full-system
 riscv64 coverage remain open. No tags, releases, settings or pi/pi-env code were
 changed by this slice.
+
+### Ordinary intermediaries
+
+A late follow-up reproduced `procward run -- python3 -c 'subprocess.run(...)'`
+returning 125: Python closes descriptors by default but retains the outer
+application metadata. The approved correction treats stale/closed/mismatched
+application metadata as non-authoritative, leaves unrelated non-pipe resources
+alone, scrubs the outgoing environment, and always establishes fresh ownership.
+It does not relax explicit native/task endpoint validation or a consumer's own
+READY checks. Focused tests now cover both Python subprocess and `sh -c`, with a
+real inner tree/result/cleanup check and a separate exhaustive contract-isolation
+probe. Both intermediary cases passed locally. No architecture skip was added.
+
+Python is a fixture prerequisite, not a procward runtime dependency. Native musl
+CI installs it alongside its existing build tools; musl release and riscv64
+fixture runtimes build the `ci/images` Dockerfiles from their unchanged pinned
+FROM references with a Python package layer. Normal binary startup benchmarks
+therefore do not include package installation. The final follow-up matrix must
+confirm these added intermediary cases on all twelve rows; the earlier matrix
+above remains evidence for the four direct-nesting cases, not that follow-up.
