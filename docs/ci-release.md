@@ -135,11 +135,13 @@ tag fails before building. No previously uploaded branch artifact is reused.
 3. Require all 24 zips and exact embedded binary/document bytes. Generate
    `SHA256SUMS` over the 24 downloadable zips, not itself. Changing any package or
    embedded subject after freezing fails verification.
-4. The signing-only job attests every zip, its exact inner binary and the checksum
-   manifest with [actions/attest](https://github.com/actions/attest), GitHub OIDC
-   and Sigstore build provenance. It has `contents: read`, `id-token: write` and
-   `attestations: write`. The older `actions/attest-build-provenance` is a supported
-   wrapper, but upstream recommends `actions/attest`.
+4. Per-target signing-only jobs attest each target's zips and exact inner binaries
+   (including VM-returned bytes) with [actions/attest](https://github.com/actions/attest),
+   GitHub OIDC and Sigstore build provenance. A separate fan-in signer attests the
+   checksum manifest only after every target signer succeeds. Signing jobs have
+   `contents: read`, `id-token: write` and `attestations: write`. The older
+   `actions/attest-build-provenance` is a supported wrapper, but upstream recommends
+   `actions/attest`.
 5. The publisher alone has `contents: write` (and `attestations: read`, no OIDC).
    It rechecks frozen bytes and all provenance with expected repository, workflow,
    tag and source digest before creating anything. It creates a **draft** for the
