@@ -20,6 +20,7 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
     let tty = unsafe { BorrowedFd::borrow_raw(0) };
     let saved = termios::tcgetattr(tty).unwrap();
+    publish(dir.join("saved-state"), format!("{saved:?}")).unwrap();
     let mut child = Command::new(binary);
     child
         .args([
@@ -38,6 +39,14 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
         .process_group(0);
     if dir.join("redirect").exists() {
         child.stderr(fs::File::create(dir.join("stderr")).unwrap());
+    }
+    unsafe {
+        child.pre_exec(|| {
+            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+                libc::signal(signal, libc::SIG_DFL);
+            }
+            Ok(())
+        });
     }
     #[expect(
         clippy::zombie_processes,
@@ -60,6 +69,11 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
             if status.stopped() {
                 termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
                 publish(
+                    dir.join("paused-state"),
+                    format!("{:?}", termios::tcgetattr(tty).unwrap()),
+                )
+                .unwrap();
+                publish(
                     dir.join("stopped"),
                     format!(
                         "{}",
@@ -81,6 +95,17 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                     ),
                 )
                 .unwrap();
+                publish(
+                    dir.join("takeover-final"),
+                    format!("{:?}", termios::tcgetattr(tty).unwrap()),
+                )
+                .unwrap();
+                if dir.join("keep").exists() {
+                    while !dir.join("finish").exists() {
+                        assert!(Instant::now() < deadline, "shell hold deadline");
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
                 return;
             }
         }
@@ -93,6 +118,13 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
                     rp::kill_process_group(pid, Signal::CONT).unwrap();
                 }
                 "reclaim" => termios::tcsetpgrp(tty, rp::getpgrp()).unwrap(),
+                "takeover" => {
+                    termios::tcsetpgrp(tty, rp::getpgrp()).unwrap();
+                    let mut state = termios::tcgetattr(tty).unwrap();
+                    state.local_modes ^= termios::LocalModes::ECHO;
+                    termios::tcsetattr(tty, termios::OptionalActions::Now, &state).unwrap();
+                    publish(dir.join("takeover"), format!("{state:?}")).unwrap();
+                }
                 "race" => {
                     let worker = fs::read_to_string(dir.join("worker"))
                         .unwrap()
@@ -123,6 +155,7 @@ pub fn child(dir: &Path) {
     .unwrap();
     let terminal = termios::tcgetpgrp(&tty).unwrap();
     publish(dir.join("primary"), std::process::id().to_string()).unwrap();
+    publish(dir.join("anchor"), rp::getppid().unwrap().to_string()).unwrap();
     publish(
         dir.join("terminal"),
         format!(
@@ -164,9 +197,21 @@ pub fn child(dir: &Path) {
         match rio::read(stdin, &mut byte) {
             Ok(1) => match byte[0] {
                 b'q' => {
+                    if dir.to_string_lossy().ends_with("tail") {
+                        std::io::stdout().write_all(&vec![b'x'; 262144]).unwrap();
+                    }
                     println!("FINAL-TAIL");
                     eprintln!("REDIRECTED-TAIL");
                     std::process::exit(23);
+                }
+                b'f' => {
+                    println!("FLOOD-BEGIN");
+                    std::io::stdout().flush().unwrap();
+                    for n in 1..16384 {
+                        std::io::stdout().write_all(&[b'x'; 4096]).unwrap();
+                        publish(dir.join("flood-count"), n.to_string()).unwrap();
+                    }
+                    publish(dir.join("flood-done"), b"done").unwrap();
                 }
                 b'p' => {
                     println!(

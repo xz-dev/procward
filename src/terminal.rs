@@ -130,9 +130,7 @@ impl Terminal {
             let result = termios::tcsetattr(&self.physical, OptionalActions::Now, &self.saved);
             self.raw = false;
             if let Err(error) = result {
-                if !self.foreground()? {
-                    eprintln!("procward: terminal restoration denied: {error}");
-                } else {
+                if self.foreground()? {
                     return Err(error.into());
                 }
             }
@@ -142,9 +140,7 @@ impl Terminal {
 }
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let Err(error) = self.restore() {
-            eprintln!("procward: terminal restoration denied: {error}");
-        }
+        let _ = self.restore();
     }
 }
 fn read_buffer(fd: &OwnedFd, target: &mut Vec<u8>, pty: bool) -> io::Result<bool> {

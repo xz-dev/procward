@@ -31,6 +31,15 @@ impl Terminal {
             stdfs::write(dir.join("redirect"), b"redirect").unwrap();
         }
         let pty = rustix_openpty::openpty(None, None).unwrap();
+        if label == "blocked" {
+            let mut state = rustix::termios::tcgetattr(&pty.user).unwrap();
+            state.local_modes |= rustix::termios::LocalModes::TOSTOP;
+            rustix::termios::tcsetattr(&pty.user, rustix::termios::OptionalActions::Now, &state)
+                .unwrap();
+        }
+        if label == "paused-loss" {
+            stdfs::write(dir.join("keep"), b"hold shell alive").unwrap();
+        }
         fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK).unwrap();
         let raw = pty.user.as_raw_fd();
         let fixture = std::env::current_exe()
@@ -152,7 +161,13 @@ fn interactive_primary_has_private_foreground_terminal_and_preserves_tail_and_st
     });
     assert_eq!(terminal.file("result"), "23");
     terminal.until("host exit", |t| t.dir.join("restored").exists());
-    assert_eq!(terminal.file("restored"), "true");
+    assert_eq!(
+        terminal.file("restored"),
+        "true",
+        "saved={} actual={}",
+        terminal.file("saved-state"),
+        terminal.file("takeover-final")
+    );
     assert!(terminal.host.wait().unwrap().success());
 }
 
@@ -164,7 +179,7 @@ fn shell_reclaim_does_not_block_fatal_cleanup_or_kill_shell() {
     let fault = Instant::now();
     terminal.action("term");
     terminal.until("cleanup after shell reclaim", |t| {
-        t.dir.join("result").exists()
+        t.dir.join("takeover-final").exists()
     });
     assert!(
         fault.elapsed() < Duration::from_secs(2),
@@ -216,7 +231,9 @@ fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont
         assert_eq!(
             terminal.file("stopped"),
             "true",
-            "pause must restore saved cooked settings"
+            "pause must restore saved cooked settings; saved={} actual={}",
+            terminal.file("saved-state"),
+            terminal.file("paused-state")
         );
         terminal.until("primary and detached worker stopped", |t| {
             stopped(&t.file("primary")) && stopped(&t.file("worker"))
@@ -264,4 +281,99 @@ fn interactive_stderr_keeps_its_redirected_destination() {
     assert_eq!(terminal.file("stderr"), "REDIRECTED-TAIL\n");
     assert!(!terminal.output.contains("REDIRECTED-TAIL"));
     assert!(terminal.host.wait().unwrap().success());
+}
+
+#[test]
+fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
+    let mut terminal = Terminal::new("tail");
+    terminal.until("ready output", |t| t.output.contains("TTY-READY"));
+    terminal.input(&[3]);
+    terminal.input(b"p");
+    terminal.until("single interrupt acknowledgement", |t| {
+        t.output.contains("REPLY 1")
+    });
+    terminal.input(b"q");
+    terminal.until("complete final tail and result", |t| {
+        t.output.contains("FINAL-TAIL") && t.dir.join("result").exists()
+    });
+    assert_eq!(
+        terminal.output.bytes().filter(|b| *b == b'x').count(),
+        262144
+    );
+    assert_eq!(terminal.file("result"), "23");
+    assert_eq!(
+        terminal.file("restored"),
+        "true",
+        "saved={} actual={}",
+        terminal.file("saved-state"),
+        terminal.file("takeover-final")
+    );
+    assert!(terminal.host.wait().unwrap().success());
+}
+
+#[test]
+fn fatal_cleanup_discards_blocked_output_and_respects_unrelated_terminal_authority() {
+    let mut terminal = Terminal::new("blocked");
+    terminal.until("ready output", |t| {
+        t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+    });
+    terminal.input(b"f");
+    terminal.until("writer starts output", |t| {
+        t.output.contains("FLOOD-BEGIN") && t.dir.join("flood-count").exists()
+    });
+    terminal.action("takeover");
+    assert!(
+        !terminal.dir.join("flood-done").exists(),
+        "writer must still have pending output"
+    );
+    let fault = Instant::now();
+    terminal.action("term");
+    terminal.until("fatal cleanup despite blocked physical output", |t| {
+        t.dir.join("takeover-final").exists()
+    });
+    assert!(
+        fault.elapsed() < Duration::from_secs(2),
+        "configured teardown deadline"
+    );
+    assert_eq!(
+        terminal.file("takeover-final"),
+        terminal.file("takeover"),
+        "denied restoration must not overwrite unrelated foreground state"
+    );
+    assert!(terminal.host.wait().unwrap().success());
+}
+
+fn absent(pid: &str) -> bool {
+    match process::test_kill_process(Pid::from_raw(pid.parse().unwrap()).unwrap()) {
+        Err(Errno::SRCH) => true,
+        Ok(()) => false,
+        Err(error) => panic!("liveness query failed: {error}"),
+    }
+}
+
+#[test]
+fn owner_loss_while_paused_cleans_work_without_foreground_rescue() {
+    let mut terminal = Terminal::new("paused-loss");
+    terminal.until("primary and worker ready", |t| {
+        t.output.contains("TTY-READY") && t.dir.join("worker").exists()
+    });
+    terminal.input(&[26]);
+    terminal.until("job stopped", |t| {
+        t.dir.join("stopped").exists() && stopped(&t.file("worker"))
+    });
+    terminal.action("takeover");
+    let fault = Instant::now();
+    terminal.action("kill");
+    terminal.until("tree and independent cleanup role gone", |t| {
+        ["primary", "worker", "anchor"]
+            .iter()
+            .all(|name| absent(&t.file(name)))
+    });
+    assert!(
+        fault.elapsed() < Duration::from_secs(2),
+        "configured teardown deadline"
+    );
+    stdfs::write(terminal.dir.join("finish"), b"complete").unwrap();
+    assert!(terminal.host.wait().unwrap().success());
+    assert_eq!(terminal.file("takeover-final"), terminal.file("takeover"));
 }

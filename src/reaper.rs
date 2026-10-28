@@ -78,6 +78,7 @@ pub fn run_owned(
     let mut inventory = Inventory::new();
     let mut result = None;
     let mut requested = None;
+    let mut owner_lost = false;
     let mut paused = false;
     let observed = (|| -> io::Result<()> {
         loop {
@@ -88,7 +89,8 @@ pub fn run_owned(
             }
             inventory.refresh()?;
             if !crate::owner::alive(lease)? {
-                return Err(io::Error::other("owner lease ended"));
+                owner_lost = true;
+                return Ok(());
             }
             match process::waitid(
                 WaitId::Pid(primary),
@@ -158,7 +160,7 @@ pub fn run_owned(
         Some(signal) => child.signal(signal),
         None => Ok(()),
     };
-    let fatal = observed.is_err() || requested.is_some();
+    let fatal = observed.is_err() || requested.is_some() || owner_lost;
     cleanup(&mut inventory, Some(primary), &mut result, policy)?;
     if let Some(terminal) = &mut terminal {
         if !fatal {
@@ -176,9 +178,16 @@ pub fn run_owned(
         }
         terminal.restore()?;
     }
-    published?;
+    if let Err(error) = published {
+        if !owner_lost || error.raw_os_error() != Some(Errno::PIPE.raw_os_error()) {
+            return Err(error);
+        }
+    }
     forwarded?;
     observed?;
+    if owner_lost {
+        return Ok(125);
+    }
     result.ok_or_else(|| io::Error::other("primary result missing after cleanup"))
 }
 

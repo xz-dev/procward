@@ -108,6 +108,8 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
         SIGTERM,
         signal_hook::consts::SIGTSTP,
         signal_hook::consts::SIGCONT,
+        signal_hook::consts::SIGTTIN,
+        signal_hook::consts::SIGTTOU,
     ])?;
     let (read, write) = pipe()?;
     let (notice, publish) = pipe()?;
@@ -148,7 +150,7 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
     let mut observed = Inventory::new();
     loop {
         policy.refresh(&notice, config)?;
-        if std::mem::take(&mut policy.pause) {
+        if std::mem::take(&mut policy.pause) && policy.policy.is_none() {
             process::kill_process(process::getpid(), Signal::STOP)?;
         }
         #[cfg(target_os = "macos")]
@@ -164,10 +166,15 @@ pub fn run(command: &OsStr, args: &[OsString], config: Config) -> io::Result<u8>
             let mut observed = Inventory::new();
             return finish_anchor(status, &mut observed, policy);
         }
-        for signal in signals
-            .pending()
-            .filter(|signal| *signal != SIGCHLD && *signal != signal_hook::consts::SIGTSTP)
-        {
+        for signal in signals.pending().filter(|signal| {
+            !matches!(
+                *signal,
+                SIGCHLD
+                    | signal_hook::consts::SIGTSTP
+                    | signal_hook::consts::SIGTTIN
+                    | signal_hook::consts::SIGTTOU
+            )
+        }) {
             if interactive && signal == signal_hook::consts::SIGCONT {
                 continue;
             }
