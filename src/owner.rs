@@ -262,7 +262,10 @@ fn arm_parent(expected: Pid) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_endpoint(fd: rustix::fd::BorrowedFd<'_>, access: rustix::fs::OFlags) -> io::Result<()> {
+pub(crate) fn validate_endpoint(
+    fd: rustix::fd::BorrowedFd<'_>,
+    access: rustix::fs::OFlags,
+) -> io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(fd)?;
     let stat = rustix::fs::fstat(fd)?;
     let valid_access = flags & rustix::fs::OFlags::ACCMODE == access;

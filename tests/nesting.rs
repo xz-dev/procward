@@ -210,7 +210,7 @@ struct Run {
     done: bool,
 }
 impl Run {
-    fn start(label: &str, mode: &str) -> Self {
+    fn start(label: &str, mode: &str, intermediary: Option<&str>) -> Self {
         static CALLER_HYGIENE: std::sync::Once = std::sync::Once::new();
         CALLER_HYGIENE.call_once(|| {
             // CI runners leave unrelated pipes inheritable; launch with only stdio, not runner internals.
@@ -244,17 +244,45 @@ impl Run {
         let dir =
             std::env::temp_dir().join(format!("procward-nesting-{}-{label}", std::process::id()));
         fs::create_dir(&dir).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_procward"))
-            .args([
-                "run",
-                "--grace",
-                "2s",
-                "--fatal-grace",
-                "1s",
-                "--cleanup-deadline",
-                "2500ms",
-                "--",
-            ])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_procward"));
+        command.args([
+            "run",
+            "--grace",
+            "2s",
+            "--fatal-grace",
+            "1s",
+            "--cleanup-deadline",
+            "2500ms",
+            "--",
+        ]);
+        match intermediary {
+            Some("python") => {
+                let python = ["python3", "python3.11", "python"]
+                    .into_iter()
+                    .find(|name| {
+                        Command::new(name)
+                            .arg("--version")
+                            .output()
+                            .is_ok_and(|out| out.status.success())
+                    })
+                    .expect("Python is required for the ordinary-intermediary regression");
+                command.arg(python).args([
+                    "-c",
+                    "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)",
+                ]);
+            }
+            Some("sh") => {
+                #[cfg(unix)]
+                let shell = PathBuf::from("/bin/sh");
+                #[cfg(windows)]
+                let shell =
+                    PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("Git/bin/sh.exe");
+                command.arg(shell).args(["-c", "exec \"$@\"", "sh"]);
+            }
+            None => {}
+            Some(other) => panic!("unknown intermediary {other}"),
+        }
+        let child = command
             .arg(env!("CARGO_BIN_EXE_procward"))
             .args(["run", "--"])
             .arg(fixture())
@@ -322,13 +350,17 @@ impl Run {
             }
             self.targets.push(Identity::open(anchor));
             let inner = parent(anchor);
-            let outer_anchor = parent(inner);
-            assert_eq!(
-                parent(outer_anchor),
-                self.child.id(),
-                "nested ownership ancestry"
-            );
-            self.targets.push(Identity::open(outer_anchor));
+            let mut ancestor = parent(inner);
+            let mut depth = 0;
+            while ancestor != self.child.id() {
+                assert!(
+                    ancestor > 1 && depth < 8,
+                    "nested ownership ancestry escaped outer owner"
+                );
+                self.targets.push(Identity::open(ancestor));
+                ancestor = parent(ancestor);
+                depth += 1;
+            }
             inner
         };
         assert_ne!(inner, self.child.id(), "inner layer must exist");
@@ -419,7 +451,7 @@ impl Drop for Run {
 fn nested_layers_preserve_status_and_clean_on_each_owner_loss() {
     let _guard = SCENARIOS.lock().unwrap();
     for mode in ["exit", "outer-loss", "inner-loss"] {
-        let mut run = Run::start(mode, "nested-tree");
+        let mut run = Run::start(mode, "nested-tree", None);
         let inner = run.ready();
         let (fault, expected) = match mode {
             "exit" => {
@@ -466,7 +498,7 @@ fn nested_layers_preserve_status_and_clean_on_each_owner_loss() {
 #[test]
 fn nested_payload_has_only_inner_contract_metadata_and_transport() {
     let _guard = SCENARIOS.lock().unwrap();
-    let mut run = Run::start("isolation", "nested-probe");
+    let mut run = Run::start("isolation", "nested-probe", None);
     let status = run.finish(Instant::now() + Duration::from_secs(30));
     assert_eq!(
         status.code(),
@@ -483,4 +515,45 @@ fn nested_payload_has_only_inner_contract_metadata_and_transport() {
     );
     run.done = true;
     println!("NESTING PASS: contract isolation; only validated inner READY, environment and pipe");
+}
+
+#[test]
+fn ordinary_intermediaries_keep_nesting_cleanup_and_inner_contract() {
+    let _guard = SCENARIOS.lock().unwrap();
+    for intermediary in ["python", "sh"] {
+        let mut run = Run::start(
+            &format!("{intermediary}-tree"),
+            "nested-tree",
+            Some(intermediary),
+        );
+        run.ready();
+        let release = Instant::now();
+        run.child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        let deadline = release + Duration::from_secs(8);
+        assert_eq!(
+            run.finish(deadline).code(),
+            Some(23),
+            "{intermediary}: {:?}",
+            fs::read_to_string(run.dir.join("stderr.log"))
+        );
+        run.clean(deadline);
+        let mut probe = Run::start(
+            &format!("{intermediary}-probe"),
+            "nested-probe",
+            Some(intermediary),
+        );
+        assert_eq!(
+            probe
+                .finish(Instant::now() + Duration::from_secs(30))
+                .code(),
+            Some(23),
+            "{intermediary}: {:?}",
+            fs::read_to_string(probe.dir.join("stderr.log"))
+        );
+        assert!(probe.dir.join("isolated").exists());
+        probe.done = true;
+        println!(
+            "NESTING PASS: {intermediary} intermediary; inner layer, cleanup, metadata and transport isolation"
+        );
+    }
 }

@@ -66,7 +66,7 @@ jobs:
       - name: Native musl build and full fixture execution
         run: |
           docker run --rm -v "$PWD:/src" -w /src '${{ steps.images.outputs.runtime }}' sh -ec '
-            apk add --no-cache cargo rust musl-dev gcc git
+            apk add --no-cache cargo rust musl-dev gcc git python3
             git -c safe.directory=/src rev-parse HEAD
             rustc -vV
             test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "${{ matrix.target }}"
@@ -167,6 +167,10 @@ jobs:
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
           docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
+      - name: Prepare pinned fixture runtime with Python
+        run: |
+          docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
+          echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"
       - name: Cross-build exact release target and fixtures
         run: |
           cargo build --locked --release --target '${{ matrix.target }}' --bins --examples

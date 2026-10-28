@@ -182,9 +182,9 @@ fn managed_handoff_is_direct_bounded_one_shot_and_separate_from_native_ownership
 }
 
 #[test]
-fn nested_startup_rejects_invalid_inherited_transport_before_payload() {
-    let marker =
-        std::env::temp_dir().join(format!("procward-nested-invalid-{}", std::process::id()));
+fn stale_application_metadata_still_starts_fresh_ownership() {
+    let marker = std::env::temp_dir().join(format!("procward-nested-stale-{}", std::process::id()));
+    fs::create_dir(&marker).unwrap();
     let regular = fs::File::open(std::env::current_exe().unwrap()).unwrap();
     #[cfg(unix)]
     let (variable, raw) = {
@@ -211,25 +211,30 @@ fn nested_startup_rejects_invalid_inherited_transport_before_payload() {
             (regular.as_raw_handle() as usize).to_string(),
         )
     };
-    for value in ["0", "invalid", &raw] {
+    for value in ["0", "invalid", "2147483647", &raw] {
         let output = finish(
             Command::new(env!("CARGO_BIN_EXE_procward"))
                 .args(["run", "--"])
                 .arg(fixture())
-                .arg("touch")
+                .arg("managed-probe")
                 .arg(&marker)
+                .env("PROCWARD_PROTOCOL", "stale")
+                .env("PROCWARD_OWNER_PID", "1")
+                .env("PROCWARD_CONTRACT_ID", "stale")
                 .env(variable, value)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
-        assert_eq!(output.status.code(), Some(125), "{value}: {output:?}");
+        assert_eq!(output.status.code(), Some(23), "{value}: {output:?}");
         assert!(
-            !marker.exists(),
-            "invalid incoming transport launched payload"
+            marker.join("accepted").exists(),
+            "fresh READY was not accepted"
         );
+        fs::remove_file(marker.join("accepted")).unwrap();
     }
+    fs::remove_dir_all(marker).unwrap();
 }
 
 #[cfg(unix)]

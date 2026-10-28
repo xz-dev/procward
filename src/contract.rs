@@ -161,16 +161,25 @@ pub fn owner_identity() -> io::Result<String> {
 }
 
 // A nested procward replaces the application handoff; it never accepts it as an ownership opt-out.
-pub fn discard_inherited() -> io::Result<()> {
+pub fn discard_inherited() {
     #[cfg(unix)]
-    if let Some(value) = std::env::var_os("PROCWARD_LIFECYCLE_FD") {
-        drop(crate::owner::inherited_fd(
-            &value,
-            rustix::fs::OFlags::RDONLY,
-        )?);
+    if let Some(raw) = std::env::var("PROCWARD_LIFECYCLE_FD")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|raw| *raw > 2)
+    {
+        use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+        let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+        if crate::owner::validate_endpoint(fd, rustix::fs::OFlags::RDONLY).is_ok() {
+            drop(unsafe { OwnedFd::from_raw_fd(raw) });
+        }
     }
     #[cfg(windows)]
-    if let Some(value) = std::env::var_os("PROCWARD_LIFECYCLE_HANDLE") {
+    if let Some(raw) = std::env::var("PROCWARD_LIFECYCLE_HANDLE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|raw| *raw != 0)
+    {
         use std::os::windows::io::{FromRawHandle, OwnedHandle};
         use windows_sys::Win32::{
             Foundation::INVALID_HANDLE_VALUE,
@@ -179,28 +188,21 @@ pub fn discard_inherited() -> io::Result<()> {
                 GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
             },
         };
-        let raw = value
-            .to_str()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|raw| *raw != 0)
-            .ok_or_else(|| io::Error::other("invalid inherited lifecycle HANDLE"))?;
         let handle = raw as windows_sys::Win32::Foundation::HANDLE;
         unsafe {
-            if handle == INVALID_HANDLE_VALUE
-                || [
+            if handle != INVALID_HANDLE_VALUE
+                && ![
                     GetStdHandle(STD_INPUT_HANDLE),
                     GetStdHandle(STD_OUTPUT_HANDLE),
                     GetStdHandle(STD_ERROR_HANDLE),
                 ]
                 .contains(&handle)
-                || GetFileType(handle) != FILE_TYPE_PIPE
+                && GetFileType(handle) == FILE_TYPE_PIPE
             {
-                return Err(io::Error::other("invalid inherited lifecycle pipe HANDLE"));
+                drop(OwnedHandle::from_raw_handle(handle));
             }
-            drop(OwnedHandle::from_raw_handle(handle));
         }
     }
-    Ok(())
 }
 
 pub fn clear(command: &mut std::process::Command) {

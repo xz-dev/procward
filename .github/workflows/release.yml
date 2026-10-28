@@ -73,9 +73,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Read native musl image pin
+      - name: Read native musl image pin and prepare Python fixture runtime
         id: images
-        run: echo "runtime=$(sed -n 's/^FROM //p' ci/images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "pinned base=$(sed -n 's/^FROM //p' ci/images/alpine-native/Dockerfile)"
+          docker build -t procward-musl-fixtures ci/images/alpine-native
+          echo 'runtime=procward-musl-fixtures' >> "$GITHUB_OUTPUT"
       - name: Official exact-target static musl toolchain
         run: |
           git rev-parse HEAD
@@ -196,6 +199,10 @@ jobs:
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
           docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
+      - name: Prepare pinned fixture runtime with Python
+        run: |
+          docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
+          echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"
       - name: Measure and build smallest emulated distribution
         run: |
           python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-riscv64.sh'

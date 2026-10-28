@@ -68,7 +68,7 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
             if command.is_empty() {
                 return Err((125, "command must not be empty".into()));
             }
-            contract::discard_inherited().map_err(|error| (125, error.to_string()))?;
+            contract::discard_inherited();
             let mut task = control
                 .map(task::Task::open)
                 .transpose()
