@@ -60,9 +60,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Read native musl image pin
+        id: images
+        run: echo "runtime=$(sed -n 's/^FROM //p' .github/ci-images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
       - name: Native musl build and full fixture execution
         run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.23@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63 sh -ec '
+          docker run --rm -v "$PWD:/src" -w /src '${{ steps.images.outputs.runtime }}' sh -ec '
             apk add --no-cache cargo rust musl-dev gcc git
             git -c safe.directory=/src rev-parse HEAD
             rustc -vV
@@ -120,15 +123,14 @@ jobs:
         include:
           - target: riscv64gc-unknown-linux-gnu
             libc: gnu
-            image: debian:unstable-slim@sha256:d20827a3ee132f4ddf5307a4f56899e3a0ba8a7406ce51569729c564eb7d9dde
+            image: debian-riscv64
           - target: riscv64gc-unknown-linux-musl
             libc: musl
-            image: alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
+            image: alpine-riscv64
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       PROCWARD_CI_TARGET: ${{ matrix.target }}
-      PROCWARD_CI_IMAGE: ${{ matrix.image }}
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: bash .github/scripts/run-riscv64.sh
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
@@ -137,10 +139,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Read target runtime and binfmt image pins
+        id: images
+        run: |
+          runtime=$(sed -n 's/^FROM //p' '.github/ci-images/${{ matrix.image }}/Dockerfile')
+          {
+            echo "runtime=$runtime"
+            echo "binfmt=$(sed -n 's/^FROM //p' .github/ci-images/binfmt/Dockerfile)"
+          } >> "$GITHUB_OUTPUT"
+          echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         with:
           platforms: riscv64
-          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          image: ${{ steps.images.outputs.binfmt }}
       - name: Official cross toolchain and target runtime
         run: |
           git rev-parse HEAD
@@ -155,7 +166,7 @@ jobs:
           fi
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
-          docker run --rm --platform linux/riscv64 '${{ matrix.image }}' uname -m
+          docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
       - name: Cross-build exact release target and fixtures
         run: |
           cargo build --locked --release --target '${{ matrix.target }}' --bins --examples

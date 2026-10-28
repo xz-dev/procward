@@ -73,6 +73,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Read native musl image pin
+        id: images
+        run: echo "runtime=$(sed -n 's/^FROM //p' .github/ci-images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
       - name: Official exact-target static musl toolchain
         run: |
           git rev-parse HEAD
@@ -85,10 +88,16 @@ jobs:
             echo 'CARGO_TARGET_${{ matrix.key }}_RUNNER=bash .github/scripts/run-musl.sh'
           } >> "$GITHUB_ENV"
       - name: Measure and build smallest static distribution
+        env:
+          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-musl.sh'
       - name: Full suite against static dist binaries in native musl container
+        env:
+          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
         run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
       - name: Freeze release and debug packages only after fixtures pass
+        env:
+          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package --runner 'bash .github/scripts/run-musl.sh'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -145,25 +154,33 @@ jobs:
         include:
           - target: riscv64gc-unknown-linux-gnu
             libc: gnu
-            image: debian:unstable-slim@sha256:d20827a3ee132f4ddf5307a4f56899e3a0ba8a7406ce51569729c564eb7d9dde
+            image: debian-riscv64
           - target: riscv64gc-unknown-linux-musl
             libc: musl
-            image: alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
+            image: alpine-riscv64
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       PROCWARD_CI_TARGET: ${{ matrix.target }}
-      PROCWARD_CI_IMAGE: ${{ matrix.image }}
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: bash .github/scripts/run-riscv64.sh
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER: bash .github/scripts/run-riscv64.sh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Read target runtime and binfmt image pins
+        id: images
+        run: |
+          runtime=$(sed -n 's/^FROM //p' '.github/ci-images/${{ matrix.image }}/Dockerfile')
+          {
+            echo "runtime=$runtime"
+            echo "binfmt=$(sed -n 's/^FROM //p' .github/ci-images/binfmt/Dockerfile)"
+          } >> "$GITHUB_OUTPUT"
+          echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         with:
           platforms: riscv64
-          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          image: ${{ steps.images.outputs.binfmt }}
       - name: Official cross toolchain and target runtime
         run: |
           git rev-parse HEAD
@@ -178,7 +195,7 @@ jobs:
           fi
           echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
           cat /proc/sys/fs/binfmt_misc/qemu-riscv64
-          docker run --rm --platform linux/riscv64 '${{ matrix.image }}' uname -m
+          docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
       - name: Measure and build smallest emulated distribution
         run: |
           python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-riscv64.sh'
