@@ -204,3 +204,82 @@ Checksums alone are not authenticated provenance. The signed manifest authentica
 all listed zip digests, while source-pinned attestations authenticate the package
 and binary actually received. See [`gh attestation verify`](https://cli.github.com/manual/gh_attestation_verify)
 for additional policy controls.
+
+## Verified setup checkpoint — not a release
+
+Code/configuration `12eb25b` (2026-10-28):
+
+- [CI 40643574061](https://github.com/xz-dev/procward/actions/runs/40643574061):
+  all twelve rows successful on attempt 1.
+- [Dry run 40643608524](https://github.com/xz-dev/procward/actions/runs/40643608524):
+  all twelve dist-fixture/package rows and fan-in successful on attempt 1.
+  Eligibility refused publication; `attest-packages`, `attest` and `publish` were
+  **skipped**, not signing/publication passes.
+- Actions artifact `release-dry-run` (ID `12798665510`) is **189069438 bytes**,
+  including frozen binaries, debug symbols, dependency inspections and measurement
+  records as well as the 24 download zips and **2560-byte `SHA256SUMS`**.
+- Downloaded all candidate assets and reran `release-assets.py verify`: all 24
+  exact embedded binary/document/symbol subjects and checksums matched. A normal
+  consumer `sha256sum --check` passed; a copied real zip with appended bytes was
+  rejected with `SHA256SUMS mismatch: frozen assets changed`.
+- GNU riscv64 reports **2 EMULATOR-UNSUPPORTED** cases (seccomp ENOSYS and broken
+  missing-path std spawn); musl reports **1** (seccomp ENOSYS). These remain
+  unsupported, not product passes. Timing scale stays 1×.
+- No tag, release, repository setting or pi/pi-env change was made. Real OIDC
+  signing, draft creation, publication and post-publication verification remain
+  unexecuted until the separately authorized tag/release tasks.
+
+Each filename is `procward-<target>.zip` or `procward-<target>-debug.zip`:
+
+| Target | CI | Dist dry run | Release zip bytes | Debug zip bytes |
+| --- | --- | --- | ---: | ---: |
+| x86_64-unknown-linux-gnu | Passed | Passed | 272193 | 3312852 |
+| aarch64-unknown-linux-gnu | Passed | Passed | 276652 | 2797500 |
+| x86_64-unknown-linux-musl | Passed | Passed | 324876 | 3431651 |
+| aarch64-unknown-linux-musl | Passed | Passed | 314531 | 3398838 |
+| riscv64gc-unknown-linux-gnu | Applicable passed; 2 unsupported | Applicable passed; 2 unsupported | 275400 | 2795901 |
+| riscv64gc-unknown-linux-musl | Applicable passed; 1 unsupported | Applicable passed; 1 unsupported | 330387 | 3675187 |
+| x86_64-unknown-freebsd | Passed | Passed | 257829 | 1989333 |
+| aarch64-unknown-freebsd | Passed | Passed | 245818 | 2230276 |
+| x86_64-apple-darwin | Passed | Passed | 251713 | 2630143 |
+| aarch64-apple-darwin | Passed | Passed | 239636 | 2664950 |
+| x86_64-pc-windows-msvc | Passed | Passed | 258987 | 3177505 |
+| aarch64-pc-windows-msvc | Passed | Passed | 246892 | 3074074 |
+
+Full comparison from that dry run, each cell **binary bytes / startup median ms**.
+Container/emulator/VM timings include their executor overhead, not comparable
+native-hardware performance. Size alone selects the setting; aarch64 GNU has
+an exact 2/s/z size tie and selects first-measured 2.
+
+| Target | 2 bytes / ms | 3 bytes / ms | s bytes / ms | z bytes / ms | Selected |
+| --- | ---: | ---: | ---: | ---: | --- |
+| x86_64-unknown-linux-gnu | 566096 / 0.566 | 571200 / 0.572 | 528864 / 0.577 | 519144 / 0.570 | z |
+| aarch64-unknown-linux-gnu | 529248 / 0.558 | 529256 / 0.565 | 529248 / 0.585 | 529248 / 0.587 | 2 |
+| x86_64-unknown-linux-musl | 669672 / 183.610 | 674728 / 181.286 | 632008 / 181.642 | 622120 / 181.130 | z |
+| aarch64-unknown-linux-musl | 593224 / 154.932 | 609024 / 155.603 | 572728 / 161.837 | 561664 / 162.049 | z |
+| riscv64gc-unknown-linux-gnu | 504784 / 208.142 | 517072 / 203.857 | 492496 / 202.699 | 484304 / 205.653 | z |
+| riscv64gc-unknown-linux-musl | 572392 / 185.613 | 581888 / 183.523 | 559984 / 184.744 | 549328 / 184.229 | z |
+| x86_64-unknown-freebsd | 532256 / 1.094 | 538816 / 1.095 | 497888 / 1.090 | 494480 / 1.095 | z |
+| aarch64-unknown-freebsd | 486888 / 46.125 | 502360 / 45.087 | 456936 / 44.036 | 451824 / 46.170 | z |
+| x86_64-apple-darwin | 501536 / 7.436 | 505648 / 8.614 | 468800 / 7.685 | 456656 / 6.068 | z |
+| aarch64-apple-darwin | 505584 / 3.101 | 505584 / 3.241 | 489120 / 2.412 | 456592 / 2.924 | z |
+| x86_64-pc-windows-msvc | 605184 / 7.167 | 613376 / 7.351 | 545792 / 7.529 | 531456 / 7.617 | z |
+| aarch64-pc-windows-msvc | 571904 / 9.757 | 578560 / 9.788 | 524800 / 9.492 | 509952 / 10.097 | z |
+
+Fix-forward history is retained in ordinary logs: first CI `40636720688` exposed
+root-owned Alpine build output blocking the host dist step; first dry run
+`40636732809` exposed Cargo's hashed `deps/` dSYM location. `7c2180a` restores
+host target ownership and selects the dSYM by matching executable UUID, then
+verifies its DWARF. Dry run `40637258166` built/tested all twelve rows but its
+fan-in correctly rejected Windows CRLF distribution documents; `dd894e9` pins
+only the three packaged documents to LF. A separate `core.autocrlf=true` checkout
+self-check confirms exact source bytes. The final dry run above passed all checks.
+
+CI `40641026022` at `c79378b` passed all twelve rows on attempt 2 after an ordinary
+unchanged-source GNU riscv64 rerun. Attempt 1's blocked-physical-output terminal
+fixture exceeded its 8-second fault bound and reported harness rescue. No
+assertion/deadline or product code was changed for that rerun; root cause is not
+established and remains a pre-tag review risk, not a claimed fix. The later
+`12eb25b` CI and dry run passed on attempt 1. Independent implementation review
+(task 5.5), owner prerequisites/release (section 6), later pi integration (section
+7) and full-system riscv64 coverage remain open.
