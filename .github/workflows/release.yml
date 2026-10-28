@@ -213,8 +213,45 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
-  attest:
+  attest-packages:
     needs: [eligibility, manifest]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.eligibility.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - riscv64gc-unknown-linux-gnu
+          - riscv64gc-unknown-linux-musl
+          - x86_64-unknown-freebsd
+          - aarch64-unknown-freebsd
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts
+      - name: Attest target's frozen zips and exact embedded binaries
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/*.zip
+            artifacts/procward
+            artifacts/procward-debug
+            artifacts/*.exe
+  attest:
+    needs: [eligibility, manifest, attest-packages]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -228,15 +265,10 @@ jobs:
           name: unsigned-release
           path: artifacts
       - run: python3 .github/scripts/release-assets.py verify
-      - name: Attest frozen zips, exact embedded binaries and checksum manifest
+      - name: Attest frozen checksum manifest after all target attestations
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: |
-            artifacts/*/*.zip
-            artifacts/*/procward
-            artifacts/*/procward-debug
-            artifacts/*/*.exe
-            artifacts/SHA256SUMS
+          subject-path: artifacts/SHA256SUMS
       - run: python3 .github/scripts/release-assets.py verify
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
