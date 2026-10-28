@@ -42,6 +42,7 @@ struct PolicyReader {
     bytes: [u8; RECORD_LEN],
     filled: usize,
     policy: Option<Policy>,
+    progress: std::collections::HashSet<crate::policy::SignalIdentity>,
     pause: bool,
     resumed: bool,
     result: Option<u8>,
@@ -53,6 +54,7 @@ impl PolicyReader {
             bytes: [0; RECORD_LEN],
             filled: 0,
             policy: None,
+            progress: std::collections::HashSet::new(),
             pause: false,
             resumed: false,
             result: None,
@@ -97,9 +99,6 @@ impl PolicyReader {
                         continue;
                     }
                     Ok(_) => {
-                        if self.policy.is_some() {
-                            return Err(io::Error::other("duplicate native cleanup policy"));
-                        }
                         self.bytes[0] = byte[0];
                         self.filled = 1;
                     }
@@ -113,7 +112,14 @@ impl PolicyReader {
                 Ok(count) => {
                     self.filled += count;
                     if self.filled == RECORD_LEN {
-                        self.policy = Some(Policy::from_record(&self.bytes, config)?);
+                        if &self.bytes[..4] == b"PWT1" {
+                            self.progress
+                                .insert(crate::policy::progress_record(&self.bytes)?);
+                        } else if self.policy.is_some() {
+                            return Err(io::Error::other("duplicate native cleanup policy"));
+                        } else {
+                            self.policy = Some(Policy::from_record(&self.bytes, config)?);
+                        }
                         self.filled = 0;
                     }
                 }
@@ -187,7 +193,6 @@ pub fn run(
     let pid = Pid::from_raw(anchor.id() as i32).unwrap();
     let mut policy = PolicyReader::new();
     let mut cancelled = false;
-    #[cfg(target_os = "macos")]
     let mut observed = Inventory::new();
     loop {
         policy.refresh(&notice, config)?;
@@ -219,11 +224,10 @@ pub fn run(
             if let (Some(task), Some(result)) = (&mut task, policy.result) {
                 task.primary(u32::from(result))?;
             }
+            observed.progress().inherit(policy.progress);
             let policy = policy
                 .policy
                 .unwrap_or_else(|| Policy::new(config, status.signal().is_some()));
-            #[cfg(not(target_os = "macos"))]
-            let mut observed = Inventory::new();
             let result = finish_anchor(status, &mut observed, policy);
             if status.signal().is_some() {
                 if let Some(saved) = &saved_terminal {
@@ -437,6 +441,41 @@ pub(crate) mod tests {
         assert!(
             reader.policy.is_none(),
             "no publication means fallback must select its first policy"
+        );
+    }
+
+    #[test]
+    fn takeover_inherits_signal_progress_only_for_the_same_identity() {
+        let _guard = PROCESS_LOCK.lock().unwrap();
+        let config = Config::default();
+        let (read, write) = pipe().unwrap();
+        publish(&write, Policy::new(config, false)).unwrap();
+        let mut progress = crate::policy::Progress::default();
+        progress.publish_to(&write).unwrap();
+        let identity = [42, 100, 0, 0, 0];
+        assert_eq!(
+            progress
+                .signals(crate::policy::Phase::Grace, identity, &mut false)
+                .unwrap(),
+            &[Signal::TERM, Signal::CONT]
+        );
+        let mut reader = PolicyReader::new();
+        reader.refresh(&read, config).unwrap();
+        assert!(reader.policy.is_some());
+        assert_eq!(reader.progress.len(), 1);
+        let mut fallback = crate::policy::Progress::default();
+        fallback.inherit(reader.progress);
+        assert!(
+            fallback
+                .signals(crate::policy::Phase::Grace, identity, &mut false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fallback
+                .signals(crate::policy::Phase::Grace, [42, 101, 0, 0, 0], &mut false)
+                .unwrap(),
+            &[Signal::TERM, Signal::CONT]
         );
     }
 

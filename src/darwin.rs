@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-use crate::policy::{Phase, next_signals};
+use crate::policy::{Phase, Progress, SignalIdentity};
 use libproc::{
     bsd_info::BSDInfo,
     proc_pid::pidinfo,
@@ -24,6 +24,15 @@ struct Identity {
     saved_uid: u32,
 }
 impl Identity {
+    fn signal_identity(self) -> SignalIdentity {
+        [
+            u64::from(self.pid),
+            self.seconds,
+            self.micros,
+            (u64::from(self.uid) << 32) | u64::from(self.real_uid),
+            u64::from(self.saved_uid),
+        ]
+    }
     fn from_info(info: &BSDInfo) -> Self {
         Self {
             pid: info.pbi_pid,
@@ -39,7 +48,7 @@ struct Target {
     identity: Identity,
     term_sent: bool,
 }
-pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>);
+pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>, Progress);
 
 fn list_children(parent: u32) -> io::Result<Vec<u32>> {
     // libproc 0.14.11 checks errno on a valid empty result without clearing stale errno first.
@@ -83,7 +92,10 @@ fn signal_if_current(
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new(), HashSet::new())
+        Self(HashMap::new(), HashSet::new(), Progress::default())
+    }
+    pub fn progress(&mut self) -> &mut Progress {
+        &mut self.2
     }
     pub fn refresh(&mut self) -> io::Result<()> {
         let root = process::getpid();
@@ -180,7 +192,11 @@ impl Inventory {
                 gone.push(*pid);
                 continue;
             }
-            for signal in next_signals(phase, &mut target.term_sent) {
+            for signal in self.2.signals(
+                phase,
+                target.identity.signal_identity(),
+                &mut target.term_sent,
+            )? {
                 // macOS has an unavoidable final identity-check/use race, not kernel containment.
                 let current = match query(*pid) {
                     Ok(info) => info.as_ref().map(Identity::from_info),

@@ -873,3 +873,63 @@ fn anchor_failover_preserves_configured_policy_or_starts_one_only_before_publica
         }
     }
 }
+
+#[test]
+fn early_anchor_loss_does_not_repeat_teardown_cont_for_adopted_identity() {
+    let dir = Scratch::new();
+    let mut cmd = command();
+    cmd.args([
+        "run",
+        "--grace",
+        "2s",
+        "--fatal-grace",
+        "1s",
+        "--cleanup-deadline",
+        "2500ms",
+        "--",
+    ])
+    .arg(fixture())
+    .arg("cleanup-order")
+    .arg(&dir.0);
+    let mut run = Run::start(cmd);
+    let primary = run.remember(&dir.0, "cleanup-order");
+    let worker = run.remember(&dir.0, "order-worker");
+    let stat = fs::read_to_string(format!("/proc/{primary}/stat")).unwrap();
+    let anchor = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let anchor = pidfd_open(Pid::from_raw(anchor).unwrap(), PidfdFlags::empty()).unwrap();
+    poll(|| {
+        fs::read_to_string(format!("/proc/{worker}/stat"))
+            .unwrap()
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .next()
+            == Some("T")
+    });
+    let start = Instant::now();
+    run.release_primary();
+    poll(|| fs::read_to_string(dir.0.join("order-observed")).is_ok_and(|text| text == "true 1"));
+    pidfd_send_signal(&anchor, Signal::KILL).unwrap();
+    let output = run.finish();
+    assert_eq!(output.status.code(), Some(125), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(dir.0.join("order-observed")).unwrap(),
+        "true 1",
+        "failover must preserve one CONT per retained identity"
+    );
+    assert!(absent(worker));
+    assert!(start.elapsed() >= Duration::from_secs(2));
+    assert!(
+        start.elapsed() <= Duration::from_millis(2500),
+        "original cleanup deadline"
+    );
+}

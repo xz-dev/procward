@@ -255,8 +255,22 @@ fn freebsd_reaper_lifecycle_and_targeted_parent_death_wake() {
             }
         });
     }
-    {
-        let mut run = Run::new("cleanup-order", 3);
+    for failover in [false, true] {
+        let mut run = Run::new("cleanup-order", 3 + usize::from(failover));
+        let primary = run.pid("cleanup-order");
+        let out = Command::new("ps")
+            .args(["-o", "ppid=", "-p", &primary.to_string()])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let anchor = Pid::from_raw(
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
         let worker = run.pid("order-worker");
         wait_file(&run.dir.join("order-ready"));
         poll(Instant::now() + Duration::from_secs(20), || {
@@ -268,7 +282,14 @@ fn freebsd_reaper_lifecycle_and_targeted_parent_death_wake() {
         });
         let start = Instant::now();
         run.release();
-        assert_eq!(run.finish().code(), Some(23));
+        if failover {
+            poll(Instant::now() + Duration::from_secs(2), || {
+                fs::read_to_string(run.dir.join("order-observed"))
+                    .is_ok_and(|text| text == "true 1")
+            });
+            process::kill_process(anchor, Signal::KILL).unwrap();
+        }
+        assert_eq!(run.finish().code(), Some(if failover { 125 } else { 23 }));
         assert_eq!(
             fs::read_to_string(run.dir.join("order-observed")).unwrap(),
             "true 1"

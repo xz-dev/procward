@@ -1,7 +1,64 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use crate::config::Config;
 use rustix::process::Signal;
-use std::{io, time::Duration};
+use std::{collections::HashSet, io, time::Duration};
+
+// PID, birth (seconds/ticks and subsecond), and platform identity credentials.
+pub type SignalIdentity = [u64; 5];
+
+#[derive(Default)]
+pub struct Progress {
+    notice: Option<rustix::fd::OwnedFd>,
+    inherited: HashSet<SignalIdentity>,
+}
+impl Progress {
+    pub fn publish_to(&mut self, notice: &rustix::fd::OwnedFd) -> io::Result<()> {
+        self.notice = Some(rustix::io::fcntl_dupfd_cloexec(notice, 3)?);
+        Ok(())
+    }
+    pub fn inherit(&mut self, sent: HashSet<SignalIdentity>) {
+        self.inherited = sent;
+    }
+    pub fn signals(
+        &self,
+        phase: Phase,
+        identity: SignalIdentity,
+        sent: &mut bool,
+    ) -> io::Result<&'static [Signal]> {
+        if self.inherited.contains(&identity) {
+            *sent = true;
+        }
+        if phase == Phase::Grace && !*sent {
+            if let Some(notice) = &self.notice {
+                let mut bytes = [0; RECORD_LEN];
+                bytes[..4].copy_from_slice(b"PWT1");
+                for (slot, value) in bytes[8..].chunks_exact_mut(8).zip(identity) {
+                    slot.copy_from_slice(&value.to_le_bytes());
+                }
+                // Reserve the one TERM/CONT before sending: a dead anchor cannot replay it.
+                loop {
+                    match rustix::io::write(notice, &bytes) {
+                        Ok(RECORD_LEN) | Err(rustix::io::Errno::PIPE) => break,
+                        Err(rustix::io::Errno::INTR) => continue,
+                        Err(rustix::io::Errno::AGAIN) => return Ok(&[]),
+                        Ok(_) => return Err(io::Error::other("partial native signal progress")),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+        Ok(next_signals(phase, sent))
+    }
+}
+
+pub fn progress_record(bytes: &[u8; RECORD_LEN]) -> io::Result<SignalIdentity> {
+    if &bytes[..4] != b"PWT1" || bytes[4..8] != [0; 4] {
+        return Err(io::Error::other("invalid native signal progress record"));
+    }
+    Ok(std::array::from_fn(|index| {
+        u64::from_le_bytes(bytes[8 + index * 8..16 + index * 8].try_into().unwrap())
+    }))
+}
 
 pub const RECORD_LEN: usize = 48;
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +149,33 @@ pub fn next_signals(phase: Phase, term_sent: &mut bool) -> &'static [Signal] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_progress_pipe_defers_first_signals_without_consuming_the_permit() {
+        let (read, write) = crate::owner::pipe().unwrap();
+        let mut progress = Progress::default();
+        progress.publish_to(&write).unwrap();
+        while rustix::io::write(&write, &[0; RECORD_LEN]).is_ok() {}
+        let mut sent = false;
+        assert!(
+            progress
+                .signals(Phase::Grace, [1, 2, 3, 4, 5], &mut sent)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!sent);
+        let mut bytes = [0; 4096];
+        while rustix::io::read(&read, &mut bytes).is_ok() {}
+        assert_eq!(
+            progress
+                .signals(Phase::Grace, [1, 2, 3, 4, 5], &mut sent)
+                .unwrap(),
+            &[Signal::TERM, Signal::CONT]
+        );
+        assert!(sent);
+        let mut bytes = [0; RECORD_LEN];
+        assert_eq!(rustix::io::read(&read, &mut bytes).unwrap(), RECORD_LEN);
+        assert_eq!(progress_record(&bytes).unwrap(), [1, 2, 3, 4, 5]);
+    }
     #[test]
     fn eof_first_keeps_six_seconds_and_original_deadline() {
         let start = now();

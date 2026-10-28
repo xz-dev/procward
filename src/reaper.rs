@@ -97,6 +97,7 @@ pub fn run_owned(
         .as_mut()
         .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
+    inventory.progress().publish_to(notice)?;
     let mut result = None;
     let mut requested = None;
     let mut owner_lost = false;

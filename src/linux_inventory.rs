@@ -6,16 +6,29 @@ use rustix::{
 };
 use std::{collections::HashMap, fs, io};
 
-pub struct Inventory(HashMap<Pid, Target>, HashMap<Pid, (OwnedFd, u64)>);
+pub struct Inventory(
+    HashMap<Pid, Target>,
+    HashMap<Pid, (OwnedFd, u64)>,
+    crate::policy::Progress,
+);
 
 struct Target {
     fd: Option<OwnedFd>,
+    identity: crate::policy::SignalIdentity,
     term_sent: bool,
 }
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new(), HashMap::new())
+        Self(
+            HashMap::new(),
+            HashMap::new(),
+            crate::policy::Progress::default(),
+        )
+    }
+
+    pub fn progress(&mut self) -> &mut crate::policy::Progress {
+        &mut self.2
     }
 
     pub fn refresh(&mut self) -> io::Result<()> {
@@ -24,6 +37,14 @@ impl Inventory {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.0.entry(pid) {
                 entry.insert(Target {
                     fd: open_identity(pid)?,
+                    // The unreaped child binds this observation until forget/reap.
+                    identity: [
+                        pid.as_raw_nonzero().get() as u64,
+                        birth(pid)?.unwrap_or(0),
+                        0,
+                        0,
+                        0,
+                    ],
                     term_sent: false,
                 });
             }
@@ -40,7 +61,10 @@ impl Inventory {
             if Some(*pid) == protected {
                 continue;
             }
-            for signal in crate::policy::next_signals(phase, &mut target.term_sent) {
+            for signal in self
+                .2
+                .signals(phase, target.identity, &mut target.term_sent)?
+            {
                 let result = match &target.fd {
                     Some(fd) => process::pidfd_send_signal(fd, *signal),
                     None => process::kill_process(*pid, *signal),
