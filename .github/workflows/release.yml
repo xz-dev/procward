@@ -1,0 +1,284 @@
+# SPDX-License-Identifier: BSD-3-Clause
+name: Release
+on:
+  push:
+    tags: ['v[0-9]*.[0-9]*.[0-9]*']
+  # Always dry-run, even when dispatched on a tag. No publish input exists.
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  eligibility:
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.event.outputs.publish }}
+      version: ${{ steps.event.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate event, exact tag, package version and source commit
+        id: event
+        run: python3 .github/scripts/release-assets.py event
+      - name: Release safety regression tests
+        run: python3 .github/scripts/test-release.py
+  native:
+    needs: eligibility
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15, target: aarch64-apple-darwin }
+          - { runner: windows-2025, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Source, executor and toolchain
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+      - name: Measure, choose smallest, freeze release and debug packages
+        shell: bash
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package
+      - name: Full suite against dist binaries
+        run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+  musl:
+    needs: eligibility
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, key: X86_64_UNKNOWN_LINUX_MUSL }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, key: AARCH64_UNKNOWN_LINUX_MUSL }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Official exact-target static musl toolchain
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustup target add '${{ matrix.target }}'
+          rustc -vV
+          {
+            echo 'CARGO_TARGET_${{ matrix.key }}_RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes'
+            echo "CARGO_TARGET_${{ matrix.key }}_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld"
+            echo 'CARGO_TARGET_${{ matrix.key }}_RUNNER=bash .github/scripts/run-musl.sh'
+          } >> "$GITHUB_ENV"
+      - name: Measure, choose smallest, freeze release and debug packages
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package --runner 'bash .github/scripts/run-musl.sh'
+      - name: Full suite against static dist binaries in native musl container
+        run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+  freebsd:
+    needs: eligibility
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-freebsd }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-freebsd }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
+        with:
+          release: '14.3'
+          arch: ${{ matrix.arch }}
+          copyback: true
+          prepare: pkg install -y rust git python311 binutils
+          run: |
+            set -eu
+            git -c safe.directory="$PWD" rev-parse HEAD
+            uname -a
+            rustc -vV
+            test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+            unset GITHUB_STEP_SUMMARY GITHUB_ENV
+            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package
+            export CARGO_PROFILE_DIST_OPT_LEVEL=$(cat 'artifacts/${{ matrix.target }}/opt-level')
+            cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
+            # Return only frozen products, not a VM-sized target directory.
+            rm -rf target
+      - name: Guest size and startup summary
+        run: cat 'artifacts/${{ matrix.target }}/summary.md' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+  riscv64:
+    needs: eligibility
+    name: ${{ matrix.target }} (qemu-user)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: riscv64gc-unknown-linux-gnu
+            libc: gnu
+            image: debian:unstable-slim@sha256:d20827a3ee132f4ddf5307a4f56899e3a0ba8a7406ce51569729c564eb7d9dde
+          - target: riscv64gc-unknown-linux-musl
+            libc: musl
+            image: alpine:3.23@sha256:1e12543f1917ce880153fe6ebc3494b3e139b33245e6b62d3d53cae6c0c9da96
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PROCWARD_CI_TARGET: ${{ matrix.target }}
+      PROCWARD_CI_IMAGE: ${{ matrix.image }}
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: bash .github/scripts/run-riscv64.sh
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER: bash .github/scripts/run-riscv64.sh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: riscv64
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - name: Official cross toolchain and target runtime
+        run: |
+          git rev-parse HEAD
+          rustup update stable --no-self-update
+          rustup target add '${{ matrix.target }}'
+          rustc -vV
+          rustup target list --installed | grep -Fx '${{ matrix.target }}'
+          echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld" >> "$GITHUB_ENV"
+          if [ '${{ matrix.libc }}' = gnu ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          fi
+          echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
+          cat /proc/sys/fs/binfmt_misc/qemu-riscv64
+          docker run --rm --platform linux/riscv64 '${{ matrix.image }}' uname -m
+      - name: Measure, choose smallest, freeze release and debug packages
+        run: |
+          python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --package --runner 'bash .github/scripts/run-riscv64.sh'
+          file 'target/${{ matrix.target }}/dist/procward'
+          readelf -h 'target/${{ matrix.target }}/dist/procward' | grep 'Machine:.*RISC-V'
+      - name: Full suite against emulated dist binaries
+        id: fixtures
+        run: |
+          set -o pipefail
+          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
+      - name: Count and list emulator-unsupported cases
+        if: always()
+        run: python3 .github/scripts/emulation-summary.py '${{ matrix.target }}' '${{ steps.fixtures.outcome }}' "$RUNNER_TEMP/riscv-fixtures.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
+  manifest:
+    needs: [eligibility, native, musl, freebsd, riscv64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: packages-*
+          path: incoming
+      - name: Require all 24 packages, match embedded subjects, freeze checksums
+        run: |
+          mkdir artifacts
+          for dir in incoming/packages-*; do mv "$dir" "artifacts/${dir#incoming/packages-}"; done
+          python3 .github/scripts/release-assets.py manifest
+          python3 .github/scripts/release-assets.py verify
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ needs.eligibility.outputs.publish == 'true' && 'unsigned-release' || 'release-dry-run' }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+  attest:
+    needs: [eligibility, manifest]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.eligibility.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-release
+          path: artifacts
+      - run: python3 .github/scripts/release-assets.py verify
+      - name: Attest frozen zips, exact embedded binaries and checksum manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/*/*.zip
+            artifacts/*/procward
+            artifacts/*/procward-debug
+            artifacts/*/*.exe
+            artifacts/SHA256SUMS
+      - run: python3 .github/scripts/release-assets.py verify
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-release
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [eligibility, attest]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.eligibility.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: v${{ needs.eligibility.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-release
+          path: artifacts
+      - name: Verify all frozen bytes and source-pinned provenance before any release creation
+        run: |
+          python3 .github/scripts/release-assets.py verify
+          for asset in artifacts/*/*.zip artifacts/*/procward artifacts/*/procward-debug artifacts/*/*.exe artifacts/SHA256SUMS; do
+            gh attestation verify "$asset" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA"
+          done
+      - name: Create draft, attach all assets, then publish
+        run: |
+          gh release create "$RELEASE_TAG" --verify-tag --target "$GITHUB_SHA" --draft --generate-notes artifacts/*/*.zip artifacts/SHA256SUMS
+          gh release edit "$RELEASE_TAG" --draft=false
+      - name: Verify published immutable release and every downloadable asset
+        run: |
+          gh release verify "$RELEASE_TAG"
+          for asset in artifacts/*/*.zip artifacts/SHA256SUMS; do
+            gh release verify-asset "$RELEASE_TAG" "$asset"
+            gh attestation verify "$asset" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA"
+          done

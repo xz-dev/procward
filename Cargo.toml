@@ -65,6 +65,16 @@ rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs"
 rustix-openpty = "=0.2.0"
 signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
 
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+incremental = false
+panic = "unwind"
+
 [patch.crates-io]
 process-wrap = { path = "third_party/process-wrap" }
 rustix = { path = "third_party/rustix" }

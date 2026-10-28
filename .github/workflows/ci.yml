@@ -31,10 +31,16 @@ jobs:
           rustup update stable --no-self-update
           rustc -vV
           test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+      - name: Release safety regression tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: python3 .github/scripts/test-release.py
       - name: Full standalone fixture suite
         run: |
           cargo build --locked --bins --examples
           cargo test --locked --all-targets -- --nocapture
+      - name: Distribution size and startup (informational)
+        shell: bash
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}'
       - name: MSRV
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
@@ -64,6 +70,14 @@ jobs:
             cargo build --locked --bins --examples
             cargo test --locked --all-targets -- --nocapture
           '
+      - name: Static distribution size and startup (informational)
+        run: |
+          rustup update stable --no-self-update
+          rustup target add '${{ matrix.target }}'
+          key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
+          export "CARGO_TARGET_${key}_RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes"
+          export "CARGO_TARGET_${key}_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld"
+          python3 .github/scripts/build-dist.py '${{ matrix.target }}'
   freebsd:
     name: ${{ matrix.target }}
     strategy:
@@ -82,8 +96,8 @@ jobs:
         with:
           release: '14.3'
           arch: ${{ matrix.arch }}
-          copyback: false
-          prepare: pkg install -y rust git
+          copyback: true
+          prepare: pkg install -y rust git python311 binutils
           run: |
             set -eu
             git -c safe.directory="$PWD" rev-parse HEAD
@@ -92,6 +106,11 @@ jobs:
             test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
             cargo build --locked --bins --examples
             cargo test --locked --all-targets -- --nocapture
+            unset GITHUB_STEP_SUMMARY GITHUB_ENV
+            python3.11 .github/scripts/build-dist.py '${{ matrix.target }}'
+            rm -rf target
+      - name: Guest distribution size and startup summary
+        run: cat 'artifacts/${{ matrix.target }}/summary.md' >> "$GITHUB_STEP_SUMMARY"
   riscv64:
     name: ${{ matrix.target }} (qemu-user)
     strategy:
@@ -146,6 +165,8 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked --release --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
+      - name: Distribution size and startup (emulated, informational)
+        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --runner 'bash .github/scripts/run-riscv64.sh'
       - name: Count and list emulator-unsupported cases
         if: always()
         run: python3 .github/scripts/emulation-summary.py '${{ matrix.target }}' '${{ steps.fixtures.outcome }}' "$RUNNER_TEMP/riscv-fixtures.log"
