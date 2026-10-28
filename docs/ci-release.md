@@ -126,9 +126,11 @@ prerelease tags, manual dispatches and release edits cannot publish. An invalid
 tag fails before building. No previously uploaded branch artifact is reused.
 
 1. Rebuild all twelve targets from the tag. Compare optimization settings, build
-   dist and dev flavours, inspect dependencies, and rerun the full applicable
-   fixture suite against **dist binaries**. Any failed/missing row blocks fan-in.
-2. Freeze each `procward-<target>.zip` and `procward-<target>-debug.zip` with maximum
+   dist, inspect dependencies, and rerun the full applicable fixture suite against
+   **dist binaries before packaging**. Any failed/missing row blocks fan-in.
+2. Require the measured/tested dist bytes to remain unchanged, then build dev
+   with debuginfo and inspect its dependencies/symbols. Freeze each
+   `procward-<target>.zip` and `procward-<target>-debug.zip` with maximum
    DEFLATE compression. Each contains `procward`/`procward.exe`, `LICENSE`,
    `README.md` and `third-party-licenses.md`, plus PDB/dSYM in Windows/macOS debug
    zips. No executable is repackaged later.
