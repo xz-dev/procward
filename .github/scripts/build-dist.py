@@ -65,9 +65,19 @@ def debug_symbols(binary, target):
         print(f"Debug PDB: {symbols}, {symbols.stat().st_size} bytes")
     elif "darwin" in target:
         symbols = binary.with_name(binary.name + ".dSYM")
-        dwarf = symbols / "Contents/Resources/DWARF" / binary.name
-        if not dwarf.is_file() or dwarf.stat().st_size < 1024:
-            raise RuntimeError(f"missing or empty debug dSYM: {symbols}")
+        uuid = subprocess.check_output(["dwarfdump", "--uuid", str(binary)], text=True).split()[1]
+        if not symbols.exists():
+            # Cargo can leave packed symbols beside the hashed executable in deps/.
+            for candidate in sorted((binary.parent / "deps").glob("procward-*.dSYM")):
+                candidate_uuid = subprocess.check_output(["dwarfdump", "--uuid", str(candidate)], text=True).split()[1]
+                if candidate_uuid == uuid:
+                    shutil.copytree(candidate, symbols)
+                    break
+        dwarf_files = list((symbols / "Contents/Resources/DWARF").glob("*"))
+        if not dwarf_files or not any(path.stat().st_size >= 1024 for path in dwarf_files):
+            raise RuntimeError(f"missing debug dSYM for UUID {uuid}: {symbols}; candidates={list(binary.parent.rglob('*.dSYM'))}")
+        if subprocess.check_output(["dwarfdump", "--uuid", str(symbols)], text=True).split()[1] != uuid:
+            raise RuntimeError(f"debug dSYM UUID differs from executable: {symbols}")
         run("dwarfdump", "--verify", str(symbols))
     else:
         symbols = None

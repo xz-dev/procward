@@ -72,6 +72,7 @@ jobs:
           '
       - name: Static distribution size and startup (informational)
         run: |
+          sudo chown -R "$(id -u):$(id -g)" target
           rustup update stable --no-self-update
           rustup target add '${{ matrix.target }}'
           key=$(echo '${{ matrix.target }}' | tr '[:lower:]-' '[:upper:]_')
