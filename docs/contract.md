@@ -118,7 +118,11 @@ all open Unix descriptors or snapshots all Windows handles, rather than assuming
 unused handle numbers prove noninheritance. Before its first spawn, the test
 launcher marks unrelated ambient CI-runner pipes non-inheritable; it does not
 exclude any pipe from the payload assertion. Omitting procward's inherited
-handoff discard still fails that assertion with an extra outer pipe.
+handoff discard still fails that assertion with an extra outer pipe. Windows
+stdio aliases are recognized by `CompareObjectHandles`, not by matching raw
+HANDLE numbers. Scenarios are serialized so another test's transient spawn
+handles cannot enter the tested tree. The outer lifecycle pipe is a distinct
+kernel object and is never excluded as stdio.
 
 ## Owner loss and shutdown
 

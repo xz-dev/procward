@@ -256,3 +256,94 @@ Local follow-up gates passed outside the installed pi subreaper in task-owned
 plus an official self-contained riscv64 musl release cross-build. Setting the
 emulator flag alone on native Linux still ran both original capability assertions
 and emitted zero unsupported markers. Strict OpenSpec validation passed.
+
+## Default nesting checkpoint (addendum-15)
+
+The pi contract now requires a new pi-added layer under pi or any external
+procward. Only the launcher's ownership flag/environment opt-out disables that
+layer; only pi's private one-shot bootstrap marker plus valid READY suppresses
+that bootstrap's second wrapping. Pi implementation remains section 7 work, not
+code changed here. Procward itself always supports nested `run` scopes.
+
+The new `tests/nesting.rs` executes the real
+`procward run -- procward run -- <fixture>` boundary. It checks payload result
+23 through both layers, outer-owner loss, inner-owner loss (Unix 137 / explicit
+Windows native 71), and exclusive inner contract metadata/transport. Unix's
+worker ignores TERM; Linux/FreeBSD also detach the branch and stop the worker,
+and FreeBSD gives that branch a subordinate reaper. The outer policy is
+2s / 1s / 2500ms against the inner defaults 6s / 3s / 7500ms. Fault timing starts
+immediately before the actual kill, after identity preflight; every fault still
+must complete inside the unchanged outer 2500ms deadline. Normal exit allows
+the inner ordinary grace to finish before the outer primary exits. macOS uses
+an attached tree and retains the documented best-effort observation boundary.
+
+The fixtures found one product defect: an incoming lifecycle endpoint survived
+into the nested payload even though its environment had been replaced.
+`c207383` discards that endpoint before native roles/new handoff setup, reusing
+Unix pipe/access validation and checking Windows pipe handles. Invalid incoming
+transports fail before payload side effects. The first red test saw outer fd 6;
+a later negative control, omitting the discard after caller-hygiene fixes, still
+failed with pipes `[6, 7]` instead of only inner `[7]`. Restored code passed.
+
+Fix-forward CI also corrected harness assumptions without weakening assertions:
+
+- Linux reads procfs for parent/state facts instead of assuming procps `ps -p`
+  exists in BusyBox/minimal target containers.
+- FreeBSD traverses subordinate reaper domains because GETPIDS omits their
+  descendants. Its pipe check scans the real descriptor limit; default devfs
+  `/dev/fd` lists only 0, 1 and 2.
+- CI runners leave unrelated pipes inheritable. The launcher makes those pipes,
+  including Windows ambient stdio copies, non-inheritable before its first
+  spawn. Scenarios are serialized to exclude another test's transient handles.
+  The payload still enumerates all descriptors / snapshots all Windows handles
+  and requires only its inner pipe beyond stdio. Windows stdio aliases are
+  identified by kernel-object equality, not HANDLE numbers; unexpected handles
+  retain server-PID diagnostics. Outer lifecycle/native pipes are not whitelisted.
+
+At `ca0aaba`, [run 40677604462](https://github.com/xz-dev/procward/actions/runs/40677604462)
+concluded **success on all twelve rows**, attempt 2. The ordinary unchanged-source
+rerun followed an existing Darwin arm64 best-effort CLI fixture deadline failure
+before nesting tests; its failed attempt and labelled harness rescue remain in
+history. This does not establish a fix for that intermittent observation failure.
+
+| Target | Result in 40677604462 |
+| --- | --- |
+| x86_64-unknown-linux-gnu | Passed, including Rust 1.87 check |
+| aarch64-unknown-linux-gnu | Passed |
+| x86_64-unknown-linux-musl | Passed |
+| aarch64-unknown-linux-musl | Passed |
+| riscv64gc-unknown-linux-gnu | All four nesting cases passed; **2 existing EMULATOR-UNSUPPORTED** cases |
+| riscv64gc-unknown-linux-musl | All four nesting cases passed; **1 existing EMULATOR-UNSUPPORTED** case |
+| x86_64-unknown-freebsd | Passed |
+| aarch64-unknown-freebsd | Passed; outer/inner-loss completion 2.306s / 2.345s, both below 2.5s |
+| x86_64-apple-darwin | Passed, best-effort |
+| aarch64-apple-darwin | Passed on unchanged-source ordinary rerun, best-effort |
+| x86_64-pc-windows-msvc | Passed; outer Job kill-on-close ended inner Job work in 2.138ms |
+| aarch64-pc-windows-msvc | Passed; outer Job kill-on-close ended inner Job work in 4.739ms |
+
+No Windows nested-Job containment defect was observed. Assignment remained
+suspended-before-run with no breakaway request. Both owner-loss cases confirm
+all retained inner process handles signalled; primary results and contract
+isolation passed independently. The Windows pipe failures in earlier runs were
+caller/stdio inheritance in the test harness, not a kernel Job failure.
+
+Earlier fix-forward runs remain available: `40670356940` (initial harness
+portability/inherited-runner-pipe failures), `40673115511` (Windows stdio copies
+and FreeBSD arm64 preflight counted as fault time), `40674452842` (pipe-origin
+diagnostics, plus an existing riscv64 GNU terminal fixture failure), and
+`40676790053` (stdio alias diagnostics before final caller serialization).
+No old failure was relabelled as a product pass or erased.
+
+Final local Linux suite: **48 passed**, run in a task-owned tmux session outside
+the installed pi subreaper as described above. Native clippy `-D warnings`,
+formatting, Rust 1.87 all-target checks, Windows/FreeBSD all-target cross-checks
+and strict OpenSpec validation passed. Optional strict Windows clippy still
+finds the pre-existing `unnecessary_unwrap` in `tests/fixtures/windows.rs:169`;
+allowing only that known lint reports no other warnings. No unrelated lint fix
+was added. FreeBSD's existing vendored process-wrap unused-import warning also
+remains unchanged.
+
+Tasks 4.7–4.9 are complete. Independent pre-tag review (5.5), owner-controlled
+release prerequisites/publication (6), pi integration (7), and full-system
+riscv64 coverage remain open. No tags, releases, settings or pi/pi-env code were
+changed by this slice.
