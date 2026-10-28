@@ -115,7 +115,10 @@ this repository.
 `tests/nesting.rs` exercises payload exit, each owner loss and contract isolation
 through the real nested CLI on every matrix target. The isolation fixture checks
 all open Unix descriptors or snapshots all Windows handles, rather than assuming
-unused handle numbers prove noninheritance.
+unused handle numbers prove noninheritance. Before its first spawn, the test
+launcher marks unrelated ambient CI-runner pipes non-inheritable; it does not
+exclude any pipe from the payload assertion. Omitting procward's inherited
+handoff discard still fails that assertion with an extra outer pipe.
 
 ## Owner loss and shutdown
 
