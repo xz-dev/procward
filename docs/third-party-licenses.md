@@ -2644,3 +2644,69 @@ Published licence: `MIT OR Apache-2.0`.
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE
 ```
+
+## rustix-openpty 0.2.0
+
+Selected terms: MIT. Upstream attribution and permission follow.
+
+### COPYRIGHT
+
+```text
+Short version for non-lawyers:
+
+`rustix-openpty` is triple-licensed under Apache 2.0 with the LLVM Exception,
+Apache 2.0, and MIT terms.
+
+
+Longer version:
+
+Copyrights in the `rustix-openpty` project are retained by their contributors.
+No copyright assignment is required to contribute to the `rustix-openpty`
+project.
+
+Some files include code derived from Rust's `libstd`; see the comments in
+the code for details.
+
+Except as otherwise noted (below and/or in individual files), `rustix-openpty`
+is licensed under:
+
+ - the Apache License, Version 2.0, with the LLVM Exception
+   <LICENSE-Apache-2.0_WITH_LLVM-exception> or
+   <http://llvm.org/foundation/relicensing/LICENSE.txt>
+ - the Apache License, Version 2.0
+   <LICENSE-APACHE> or
+   <http://www.apache.org/licenses/LICENSE-2.0>,
+ - or the MIT license
+   <LICENSE-MIT> or
+   <http://opensource.org/licenses/MIT>,
+
+at your option.
+```
+
+### LICENSE-MIT
+
+```text
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```

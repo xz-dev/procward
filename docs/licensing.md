@@ -85,6 +85,7 @@ change. No procctl ABI shim or assertion suppression is used.
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT |
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| rustix-openpty | 0.2.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | shlex | 1.3.0 | MIT OR Apache-2.0 |
 | signal-hook | 0.4.5 | MIT OR Apache-2.0 |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 |
