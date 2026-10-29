@@ -37,7 +37,7 @@ jobs:
       - name: Full standalone fixture suite
         run: |
           cargo build --locked --bins --examples
-          cargo test --locked --all-targets -- --nocapture
+          cargo test --locked --all-targets --no-fail-fast -- --nocapture
       - name: Distribution size and startup (informational)
         shell: bash
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}'
@@ -71,7 +71,7 @@ jobs:
             rustc -vV
             test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "${{ matrix.target }}"
             cargo build --locked --bins --examples
-            cargo test --locked --all-targets -- --nocapture
+            cargo test --locked --all-targets --no-fail-fast -- --nocapture
           '
       - name: Static distribution size and startup (informational)
         run: |
@@ -109,7 +109,7 @@ jobs:
             rustc -vV
             test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
             cargo build --locked --bins --examples
-            cargo test --locked --all-targets -- --nocapture
+            cargo test --locked --all-targets --no-fail-fast -- --nocapture
             unset GITHUB_STEP_SUMMARY GITHUB_ENV
             python3.11 .github/scripts/build-dist.py '${{ matrix.target }}'
             rm -rf target
@@ -180,7 +180,7 @@ jobs:
         id: fixtures
         run: |
           set -o pipefail
-          cargo test --locked --release --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
+          cargo test --locked --release --target '${{ matrix.target }}' --all-targets --no-fail-fast -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
       - name: Distribution size and startup (emulated, informational)
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --runner 'bash .github/scripts/run-riscv64.sh'
       - name: Count and list emulator-unsupported cases
