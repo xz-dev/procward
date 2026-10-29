@@ -13,7 +13,7 @@ Download your target's `procward-<target>.zip` and `SHA256SUMS` from
 
 ```sh
 # Substitute the published version and your target.
-tag=v0.1.0
+tag=v0.1.1
 target=x86_64-unknown-linux-gnu
 asset="procward-$target.zip"
 gh release download "$tag" --repo xz-dev/procward --pattern "$asset" --pattern SHA256SUMS

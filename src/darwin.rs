@@ -47,6 +47,7 @@ impl Identity {
 struct Target {
     identity: Identity,
     term_sent: bool,
+    denied: bool,
 }
 pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>, Progress);
 
@@ -56,26 +57,111 @@ fn list_children(parent: u32) -> io::Result<Vec<u32>> {
     pids_by_type(ProcFilter::ByParentProcess { ppid: parent })
 }
 
-fn query(pid: Pid) -> io::Result<Option<BSDInfo>> {
-    match pidinfo::<BSDInfo>(pid.as_raw_nonzero().get(), 0) {
-        Ok(info) if info.pbi_pid == pid.as_raw_nonzero().get() as u32 => Ok(Some(info)),
-        Ok(_) => Err(io::Error::other(
-            "libproc returned a mismatched process PID",
-        )),
-        Err(message) => {
-            let query_errno = errno::errno().0;
-            match process::test_kill_process(pid) {
-                Err(Errno::SRCH) => Ok(None),
-                Ok(()) if query_errno == Errno::SRCH.raw_os_error() => Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("process {pid} still exists but libproc has no identity yet"),
-                )),
-                _ => Err(io::Error::other(format!(
-                    "libproc identity query for {pid} failed: {message}"
-                ))),
-            }
-        }
+// xnu bsd/sys/proc_info_private.h; xnu statically asserts this API struct is 56 bytes.
+const PROC_PIDUNIQIDENTIFIERINFO: libc::c_int = 17;
+#[repr(C)]
+struct UniqueIdentifierInfo {
+    uuid: [u8; 16],
+    unique_id: u64,
+    parent_unique_id: u64,
+    id_version: i32,
+    orig_ppid_version: i32,
+    reserved: [u64; 2],
+}
+const _: () = assert!(std::mem::size_of::<UniqueIdentifierInfo>() == 56);
+// Kernel start microseconds never reach this, so unique-ID and start-time births never compare equal.
+const UNIQUE_ID_BIRTH: u64 = u64::MAX;
+
+fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
+    let mut info = std::mem::MaybeUninit::<T>::zeroed();
+    let size = std::mem::size_of::<T>() as libc::c_int;
+    // SAFETY: T is a plain-data proc_info struct; the kernel writes at most `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid.as_raw_nonzero().get(),
+            flavor,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    match written {
+        written if written == size => Ok(unsafe { info.assume_init() }),
+        written if written <= 0 => Err(io::Error::last_os_error()),
+        _ => Err(io::Error::other("short proc_pidinfo result")),
     }
+}
+
+// xnu bsd/kern/proc_info.c proc_pidinfo_internal(): PROC_PIDTBSDINFO requires the caller's
+// effective UID (EPERM otherwise); SHORTBSDINFO and UNIQIDENTIFIERINFO skip that check.
+fn other_euid_query(pid: Pid) -> io::Result<(Identity, u32)> {
+    let before = pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
+    let info = pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)?;
+    let after = pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
+    // The never-reused per-boot unique ID on both sides binds the credentials to one process.
+    if before.unique_id != after.unique_id {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("process {pid} changed during its identity query"),
+        ));
+    }
+    if info.pbsi_pid != pid.as_raw_nonzero().get() as u32 {
+        return Err(io::Error::other(
+            "proc_pidinfo returned a mismatched process PID",
+        ));
+    }
+    Ok((
+        Identity {
+            pid: info.pbsi_pid,
+            seconds: before.unique_id,
+            micros: UNIQUE_ID_BIRTH,
+            uid: info.pbsi_uid,
+            real_uid: info.pbsi_ruid,
+            saved_uid: info.pbsi_svuid,
+        },
+        info.pbsi_ppid,
+    ))
+}
+
+fn query(pid: Pid) -> io::Result<Option<(Identity, u32)>> {
+    let raw = pid.as_raw_nonzero().get();
+    let error = match pidinfo::<BSDInfo>(raw, 0) {
+        Ok(info) if info.pbi_pid == raw as u32 => {
+            return Ok(Some((Identity::from_info(&info), info.pbi_ppid)));
+        }
+        Ok(_) => {
+            return Err(io::Error::other(
+                "libproc returned a mismatched process PID",
+            ));
+        }
+        Err(_) => io::Error::from_raw_os_error(errno::errno().0),
+    };
+    let error = if error.raw_os_error() == Some(Errno::PERM.raw_os_error()) {
+        match other_euid_query(pid) {
+            Ok(found) => return Ok(Some(found)),
+            Err(error) if error.raw_os_error().is_none() => return Err(error),
+            Err(error) => error,
+        }
+    } else {
+        error
+    };
+    match process::test_kill_process(pid) {
+        Err(Errno::SRCH) => Ok(None),
+        // EPERM proves existence of a process this user may not signal.
+        Ok(()) | Err(Errno::PERM) if error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) => {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("process {pid} still exists but has no identity yet"),
+            ))
+        }
+        _ => Err(io::Error::other(format!(
+            "macOS identity query for {pid} failed: {error}"
+        ))),
+    }
+}
+
+fn current(pid: Pid) -> io::Result<Option<Identity>> {
+    Ok(query(pid)?.map(|(identity, _)| identity))
 }
 
 fn signal_if_current(
@@ -118,8 +204,8 @@ impl Inventory {
             if !visited.insert(parent) {
                 continue;
             }
-            let before = match query(parent) {
-                Ok(Some(info)) => info,
+            let before = match current(parent) {
+                Ok(Some(identity)) => identity,
                 Ok(None) => {
                     self.0.remove(&parent);
                     continue;
@@ -127,7 +213,6 @@ impl Inventory {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
-            let before = Identity::from_info(&before);
             if parent != root
                 && self
                     .0
@@ -142,8 +227,8 @@ impl Inventory {
                 let pid = Pid::from_raw(raw as i32)
                     .ok_or_else(|| io::Error::other("invalid libproc child PID"))?;
                 match query(pid) {
-                    Ok(Some(info)) if info.pbi_ppid == before.pid => {
-                        observed.push((pid, Identity::from_info(&info)))
+                    Ok(Some((identity, ppid))) if ppid == before.pid => {
+                        observed.push((pid, identity))
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -152,8 +237,8 @@ impl Inventory {
                     Err(error) => return Err(error),
                 }
             }
-            let after = match query(parent) {
-                Ok(info) => info.as_ref().map(Identity::from_info),
+            let after = match current(parent) {
+                Ok(identity) => identity,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
@@ -165,11 +250,13 @@ impl Inventory {
                 let entry = self.0.entry(pid).or_insert(Target {
                     identity,
                     term_sent: false,
+                    denied: false,
                 });
                 if entry.identity != identity {
                     *entry = Target {
                         identity,
                         term_sent: false,
+                        denied: false,
                     };
                 }
                 pending.push(pid);
@@ -183,12 +270,12 @@ impl Inventory {
             if Some(*pid) == protected {
                 continue;
             }
-            let current = match query(*pid) {
-                Ok(info) => info.as_ref().map(Identity::from_info),
+            let now = match current(*pid) {
+                Ok(identity) => identity,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
-            if current != Some(target.identity) {
+            if now != Some(target.identity) {
                 gone.push(*pid);
                 continue;
             }
@@ -198,12 +285,12 @@ impl Inventory {
                 &mut target.term_sent,
             )? {
                 // macOS has an unavoidable final identity-check/use race, not kernel containment.
-                let current = match query(*pid) {
-                    Ok(info) => info.as_ref().map(Identity::from_info),
+                let now = match current(*pid) {
+                    Ok(identity) => identity,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                     Err(error) => return Err(error),
                 };
-                match signal_if_current(target.identity, Ok(current), || {
+                match signal_if_current(target.identity, Ok(now), || {
                     process::kill_process(*pid, *signal).map_err(io::Error::from)
                 }) {
                     Ok(true) => {}
@@ -213,6 +300,15 @@ impl Inventory {
                     }
                     Err(error) if error.raw_os_error() == Some(Errno::SRCH.raw_os_error()) => {
                         gone.push(*pid);
+                        break;
+                    }
+                    // Real/saved UIDs no longer match ours (e.g. after sudo): not signalable, still owned.
+                    Err(error) if error.raw_os_error() == Some(Errno::PERM.raw_os_error()) => {
+                        if !std::mem::replace(&mut target.denied, true) {
+                            crate::diagnostic(format!(
+                                "macOS denied signals to privileged descendant {pid}; it remains a known survivor"
+                            ));
+                        }
                         break;
                     }
                     Err(error) => return Err(error),
@@ -236,19 +332,18 @@ impl Inventory {
         };
         self.refresh()?;
         for (pid, target) in &self.0 {
-            let current = match query(*pid) {
-                Ok(info) => info.as_ref().map(Identity::from_info),
+            let now = match current(*pid) {
+                Ok(identity) => identity,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
-            signal_if_current(
-                target.identity,
-                Ok(current),
-                || match process::kill_process(*pid, signal) {
-                    Ok(()) | Err(Errno::SRCH) => Ok(()),
+            signal_if_current(target.identity, Ok(now), || {
+                match process::kill_process(*pid, signal) {
+                    // Job control cannot stop a descendant the OS forbids this user to signal.
+                    Ok(()) | Err(Errno::SRCH) | Err(Errno::PERM) => Ok(()),
                     Err(error) => Err(error.into()),
-                },
-            )?;
+                }
+            })?;
         }
         Ok(())
     }
@@ -332,7 +427,7 @@ mod tests {
                     && fs::read_to_string(&path).unwrap().parse::<i32>().is_ok()
             });
             let pid = Pid::from_raw(fs::read_to_string(path).unwrap().parse().unwrap()).unwrap();
-            self.worker = Some(Identity::from_info(&query(pid).unwrap().unwrap()));
+            self.worker = Some(current(pid).unwrap().unwrap());
             pid
         }
     }
@@ -342,7 +437,7 @@ mod tests {
             let _ = self.child.wait();
             if let Some(identity) = self.worker {
                 let pid = Pid::from_raw(identity.pid as i32).unwrap();
-                if query(pid).unwrap().as_ref().map(Identity::from_info) == Some(identity) {
+                if current(pid).unwrap() == Some(identity) {
                     eprintln!(
                         "HARNESS RESCUE: Darwin known survivor {}, expected unseen-escape demonstration: {}; NOT product cleanup",
                         identity.pid, self.expected_escape
@@ -364,18 +459,9 @@ mod tests {
         }
     }
     fn effective_uid(pid: Pid) -> Option<u32> {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
-        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
-        let written = unsafe {
-            libc::proc_pidinfo(
-                pid.as_raw_nonzero().get(),
-                libc::PROC_PIDT_SHORTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                size,
-            )
-        };
-        (written == size).then(|| unsafe { info.assume_init() }.pbsi_uid)
+        pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)
+            .ok()
+            .map(|info| info.pbsi_uid)
     }
     #[test]
     fn setuid_root_descendant_is_observed_without_failing_refresh() {
@@ -406,9 +492,35 @@ mod tests {
         assert!(still_blocked, "setuid-root ps finished before observation");
         let observed = observed.expect("setuid-root descendant missing from inventory");
         assert_eq!(
-            (observed.pid, observed.uid),
-            (pid.as_raw_nonzero().get() as u32, 0)
+            (observed.pid, observed.uid, observed.real_uid),
+            (
+                pid.as_raw_nonzero().get() as u32,
+                0,
+                process::getuid().as_raw()
+            )
         );
+        assert_eq!(
+            observed.micros, UNIQUE_ID_BIRTH,
+            "birth must be the unique ID"
+        );
+    }
+    #[test]
+    fn denied_signal_keeps_privileged_target_as_known_survivor() {
+        // xnu bsd/kern/kern_sig.c cansignal_nomac(): nobody, not even root, may signal initproc.
+        let launchd = Pid::from_raw(1).unwrap();
+        let identity = current(launchd).unwrap().unwrap();
+        let mut inventory = Inventory::new();
+        inventory.0.insert(
+            launchd,
+            Target {
+                identity,
+                term_sent: true,
+                denied: false,
+            },
+        );
+        inventory.advance(Phase::Kill, None).unwrap();
+        assert!(inventory.0[&launchd].denied);
+        assert!(!inventory.is_empty(), "unsignalable survivor was dropped");
     }
     #[test]
     fn unknown_observation_blocks_completion_without_signal_authority() {

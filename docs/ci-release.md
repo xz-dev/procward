@@ -176,7 +176,7 @@ untrusted checksum mirror. Replace `EXPECTED_TAG_COMMIT` below.
 
 ```sh
 repo=xz-dev/procward
-tag=v0.1.0
+tag=v0.1.1
 target=x86_64-unknown-linux-gnu
 commit=EXPECTED_TAG_COMMIT
 asset="procward-$target.zip"

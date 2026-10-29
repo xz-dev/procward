@@ -241,7 +241,7 @@ fn help_and_version_do_not_launch_payload() {
         assert!(
             String::from_utf8(output.stdout)
                 .unwrap()
-                .contains("procward 0.1.0")
+                .contains(concat!("procward ", env!("CARGO_PKG_VERSION")))
         );
         assert!(output.stderr.is_empty());
     }

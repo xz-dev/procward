@@ -8,7 +8,7 @@ Final documentation/release setup remains pending.
 | Linux | Subreaper ancestry, birth-checked pidfds or unreaped direct-child authority; wait until ECHILD | Missing pidfds visibly limit nondirect freezing, not direct-child reaper cleanup |
 | FreeBSD | Acquired procctl reaper domain, fresh status/pids, nested-reaper subtree KILL and child waits | Required targeted wake/query/signal errors fail startup or cleanup; no sysctl/module changes |
 | Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised |
-| macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape |
+| macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape; descendants the OS forbids this user to signal stay known survivors |
 
 Linux/FreeBSD have a shell-facing owner and a reaper anchor. Noninteractive
 anchors use a separate process group; interactive native roles share the caller's
@@ -147,8 +147,20 @@ requires the count to remain one through fallback and final cleanup.
 
 macOS keeps an ESRCH-with-existing-PID identity transition as unknown, not gone:
 it neither signals from that observation nor completes while it remains pending.
-Actual denied/other queries remain errors. FreeBSD KILL ESRCH is tolerated only
-when a fresh kernel list proves no signalable member remains; wait/reaper facts,
+
+A descendant with another effective UID (setuid-root `ps`/`top`, `sudo`) denies
+`PROC_PIDTBSDINFO` with EPERM. xnu `bsd/kern/proc_info.c` exempts
+`PROC_PIDT_SHORTBSDINFO` and `PROC_PIDUNIQIDENTIFIERINFO` from that same-user
+check, so procward reads PID, parent and effective/real/saved UIDs from the short
+record between two reads of the per-boot, never-reused process unique ID. That
+unique ID replaces start time as the birth identity; a changed ID is an unknown
+observation, not identity. If `kill(2)` itself returns EPERM (real and saved UIDs
+no longer match the caller, for example after `sudo` switches users), procward
+reports the descendant once as a known survivor it cannot signal. It still blocks
+completion, and the cleanup deadline fails if it remains. Job-control freeze
+cannot stop such a descendant. Other denied or failed queries remain errors.
+
+FreeBSD KILL ESRCH is tolerated only when a fresh kernel list proves no signalable member remains; wait/reaper facts,
 not that signal result, still decide completion.
 
 Observer loss returns failure **125**, not an unmanaged success. macOS reports
