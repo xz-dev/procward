@@ -207,6 +207,122 @@ impl Drop for Run {
         );
     }
 }
+// Effective UID and per-boot unique ID through proc_info flavors xnu serves for other-UID processes.
+fn privileged_facts(pid: u32) -> Option<(u32, u64)> {
+    let mut short = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let short_size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+    // xnu bsd/sys/proc_info_private.h PROC_PIDUNIQIDENTIFIERINFO (17), 56 bytes; p_uniqueid at offset 16.
+    let mut unique = [0u64; 7];
+    let ok = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            short.as_mut_ptr().cast(),
+            short_size,
+        ) == short_size
+            && libc::proc_pidinfo(pid as i32, 17, 0, unique.as_mut_ptr().cast(), 56) == 56
+    };
+    if ok {
+        return Some((unsafe { short.assume_init() }.pbsi_uid, unique[2]));
+    }
+    let error = io::Error::last_os_error();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(libc::ESRCH),
+        "privileged identity query failed: {error}"
+    );
+    None
+}
+struct SetuidRun {
+    child: Child,
+    dir: PathBuf,
+    ps: Option<(u32, u64)>,
+}
+impl Drop for SetuidRun {
+    fn drop(&mut self) {
+        let mut rescued = false;
+        if let Some((pid, unique)) = self.ps {
+            if privileged_facts(pid).is_some_and(|(_, now)| now == unique) {
+                process::kill_process(Pid::from_raw(pid as i32).unwrap(), Signal::KILL).unwrap();
+                rescued = true;
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if rescued {
+            eprintln!(
+                "HARNESS RESCUE: setuid-root ps survived; NOT product cleanup; stderr={:?}",
+                fs::read_to_string(self.dir.join("stderr.log"))
+            );
+        }
+        fs::remove_dir_all(&self.dir).unwrap();
+        assert!(
+            !rescued || thread::panicking(),
+            "setuid-root descendant needed rescue"
+        );
+    }
+}
+#[test]
+fn darwin_setuid_root_descendant_keeps_payload_status() {
+    let dir = std::env::temp_dir().join(format!("procward-darwin-setuid-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    // ps prints this shell's argv, larger than any pipe buffer, so setuid-root ps blocks until cleanup.
+    let script = r#"/bin/ps -ww -o command= -p $$ &
+echo $! > "$1/ps.tmp" && mv "$1/ps.tmp" "$1/ps.pid"
+while [ ! -e "$1/go" ]; do sleep 0.01; done
+exit 23"#;
+    let child = Command::new(env!("CARGO_BIN_EXE_procward"))
+        .args(["run", "--", "/bin/sh", "-c", script, "sh"])
+        .arg(&dir)
+        .arg("x".repeat(256 * 1024))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(dir.join("stderr.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let mut run = SetuidRun {
+        child,
+        dir,
+        ps: None,
+    };
+    let path = run.dir.join("ps.pid");
+    poll(
+        Instant::now() + Duration::from_secs(20),
+        "ps PID-file readiness",
+        || path.try_exists().unwrap(),
+    );
+    let pid: u32 = fs::read_to_string(&path).unwrap().trim().parse().unwrap();
+    poll(
+        Instant::now() + Duration::from_secs(20),
+        "setuid-root ps exec",
+        || privileged_facts(pid).is_some_and(|(uid, _)| uid == 0),
+    );
+    run.ps = privileged_facts(pid);
+    assert!(run.ps.is_some(), "setuid-root ps exited before observation");
+    assert!(
+        run.child.try_wait().unwrap().is_none(),
+        "procward exited while a setuid-root descendant ran: {:?}",
+        fs::read_to_string(run.dir.join("stderr.log"))
+    );
+    fs::write(run.dir.join("go"), b"go").unwrap();
+    poll(
+        Instant::now() + Duration::from_secs(8),
+        "owner completion",
+        || run.child.try_wait().unwrap().is_some(),
+    );
+    assert_eq!(
+        run.child.wait().unwrap().code(),
+        Some(23),
+        "stderr={:?}",
+        fs::read_to_string(run.dir.join("stderr.log"))
+    );
+    let (pid, unique) = run.ps.unwrap();
+    assert!(
+        privileged_facts(pid).is_none_or(|(_, now)| now != unique),
+        "blocked setuid-root ps survived procward cleanup"
+    );
+}
 #[test]
 fn darwin_best_effort_tree_owner_loss_and_observer_loss() {
     {

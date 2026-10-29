@@ -363,6 +363,53 @@ mod tests {
             fs::remove_dir_all(&self.dir).unwrap();
         }
     }
+    fn effective_uid(pid: Pid) -> Option<u32> {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid.as_raw_nonzero().get(),
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        (written == size).then(|| unsafe { info.assume_init() }.pbsi_uid)
+    }
+    #[test]
+    fn setuid_root_descendant_is_observed_without_failing_refresh() {
+        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
+        // ps prints this argv, larger than any pipe buffer, so setuid-root ps stays blocked and observable.
+        let mut holder = Command::new("/bin/sh")
+            .args(["-c", "read line", "sh", &"x".repeat(256 * 1024)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ps = Command::new("/bin/ps")
+            .args(["-ww", "-o", "command=", "-p", &holder.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(ps.id() as i32).unwrap();
+        poll(|| effective_uid(pid) == Some(0));
+        let mut inventory = Inventory::new();
+        let refreshed = inventory.refresh();
+        let observed = inventory.0.get(&pid).map(|target| target.identity);
+        let still_blocked = ps.try_wait().unwrap().is_none();
+        ps.kill().unwrap();
+        ps.wait().unwrap();
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        refreshed.expect("setuid-root descendant made inventory refresh fail");
+        assert!(still_blocked, "setuid-root ps finished before observation");
+        let observed = observed.expect("setuid-root descendant missing from inventory");
+        assert_eq!(
+            (observed.pid, observed.uid),
+            (pid.as_raw_nonzero().get() as u32, 0)
+        );
+    }
     #[test]
     fn unknown_observation_blocks_completion_without_signal_authority() {
         let mut inventory = Inventory::new();
