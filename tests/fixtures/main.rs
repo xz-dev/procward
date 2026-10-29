@@ -52,7 +52,7 @@ fn main() {
             }
             process::exit(23);
         }
-        "managed-ordinary" => managed::ordinary(&args[2]),
+        "managed-ordinary" => managed::ordinary(&args[2], &args[3]),
         #[cfg(unix)]
         "terminal-host" => terminal::host(&args[2], &args[3], Path::new(&args[4])),
         #[cfg(unix)]

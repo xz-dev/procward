@@ -419,7 +419,9 @@ pub(crate) mod tests {
     pub(crate) static PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[test]
     fn native_endpoints_have_required_access_and_reject_regular_files() {
-        let _guard = PROCESS_LOCK.lock().unwrap();
+        let _guard = PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use rustix::fd::AsFd;
         let (read, write) = pipe().unwrap();
         validate_endpoint(read.as_fd(), rustix::fs::OFlags::RDONLY).unwrap();
@@ -436,7 +438,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn policy_transport_preserves_one_record_and_refuses_partial_or_duplicate_records() {
-        let _guard = PROCESS_LOCK.lock().unwrap();
+        let _guard = PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = Config::default();
         let policy = Policy::new(config, false);
         let (read, write) = pipe().unwrap();
@@ -467,7 +471,9 @@ pub(crate) mod tests {
 
     #[test]
     fn takeover_inherits_signal_progress_only_for_the_same_identity() {
-        let _guard = PROCESS_LOCK.lock().unwrap();
+        let _guard = PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = Config::default();
         let (read, write) = pipe().unwrap();
         publish(&write, Policy::new(config, false)).unwrap();

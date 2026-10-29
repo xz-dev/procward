@@ -329,6 +329,7 @@ pub fn probe(dir: &Path) -> io::Result<()> {
     let status = Command::new(env::current_exe()?)
         .arg("managed-ordinary")
         .arg(&raw)
+        .arg(process::id().to_string())
         .status()?;
     if status.code() != Some(23) {
         return Err(io::Error::other(
@@ -340,7 +341,7 @@ pub fn probe(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn ordinary(raw: &std::ffi::OsStr) {
+pub fn ordinary(raw: &std::ffi::OsStr, parent: &std::ffi::OsStr) {
     assert!(
         ENV.iter().all(|name| env::var_os(name).is_none()),
         "reusable claim leaked"
@@ -348,6 +349,7 @@ pub fn ordinary(raw: &std::ffi::OsStr) {
     #[cfg(unix)]
     {
         use rustix::fd::BorrowedFd;
+        let _ = parent;
         let raw = raw.to_str().unwrap().parse::<i32>().unwrap();
         assert_eq!(
             rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(raw) }),
@@ -355,15 +357,48 @@ pub fn ordinary(raw: &std::ffi::OsStr) {
             "application endpoint leaked"
         );
     }
+    // A handle number names nothing across processes: this fresh child may own an unrelated
+    // object at the same value. Compare object identity with the parent's endpoint instead.
     #[cfg(windows)]
     {
-        let raw = raw.to_str().unwrap().parse::<usize>().unwrap();
+        use windows_sys::Win32::{
+            Foundation::{
+                CloseHandle, CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle,
+                GetHandleInformation,
+            },
+            System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE},
+        };
+        let raw = raw.to_str().unwrap().parse::<usize>().unwrap() as _;
+        let parent = parent.to_str().unwrap().parse::<u32>().unwrap();
         let mut flags = 0;
-        assert_eq!(
-            unsafe { windows_sys::Win32::Foundation::GetHandleInformation(raw as _, &mut flags) },
-            0,
-            "application endpoint leaked"
-        );
+        if unsafe { GetHandleInformation(raw, &mut flags) } != 0 {
+            unsafe {
+                let source = OpenProcess(PROCESS_DUP_HANDLE, 0, parent);
+                assert!(!source.is_null(), "{}", io::Error::last_os_error());
+                let mut endpoint = std::ptr::null_mut();
+                assert_ne!(
+                    DuplicateHandle(
+                        source,
+                        raw,
+                        GetCurrentProcess(),
+                        &mut endpoint,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS
+                    ),
+                    0,
+                    "parent endpoint unavailable: {}",
+                    io::Error::last_os_error()
+                );
+                let same = CompareObjectHandles(endpoint, raw) != 0;
+                CloseHandle(endpoint);
+                CloseHandle(source);
+                assert!(!same, "application endpoint leaked");
+            }
+            eprintln!(
+                "ENDPOINT-NUMBER-REUSED: handle {raw:?} (flags {flags}) in the ordinary child is an unrelated object, not the endpoint"
+            );
+        }
     }
     println!("ORDINARY-CLEAN");
     process::exit(23);

@@ -35,15 +35,17 @@ own process DACL to deny Everyone.
   cleanup fails with `cleanup deadline expired` and exit 125 instead of claiming
   containment (tested). Job-control freeze cannot stop it. Other errors stay
   fatal. FreeBSD's `PROC_REAP_KILL` signals every permitted member but names a
-  denied one only if nothing was signalled before it (`kern_procctl.c`
-  `reap_kill_proc_locked`); cleanup repeats the KILL each pass, so the denial is
-  named once the permitted members are gone, possibly as `(unnamed)` when every
-  member was denied.
+  denied one only when it precedes every successful signal in the kernel walk
+  (`kern_procctl.c` `reap_kill_proc_locked`). When every member is denied the
+  call fails with EPERM and the report reads `(unnamed)`, because rustix does not
+  return `rk_fpid` on error. Cleanup repeats the KILL each pass.
 - **FreeBSD resume:** with the default `security.bsd.conservative_signals=1`,
   `cr_cansignal` lets SIGSTOP but not SIGCONT reach a set-ID descendant, and
   `PROC_REAP_KILL` has no same-session SIGCONT exemption. Job-control resume
-  then reports `FreeBSD denied SIGCONT to privileged descendant <pid>; it may
-  remain stopped` instead of resuming silently. Linux and macOS allow SIGCONT
+  reports a named denial (`FreeBSD denied SIGCONT to privileged descendant
+  <pid>; it may remain stopped`) and then reports every member still stopped
+  after resume (`FreeBSD descendant <pid> is still stopped after resume`) from
+  the kernel's stopped flag. Linux and macOS allow SIGCONT
   whenever SIGSTOP was allowed (same UID rule, plus a same-session SIGCONT
   exemption).
 - **Credential changes:** a known descendant that later execs a setuid program
@@ -202,11 +204,13 @@ macOS keeps an ESRCH-with-existing-PID identity transition as unknown, not gone:
 it neither signals from that observation nor completes while it remains pending.
 
 macOS identifies every process by PID plus its per-boot, never-reused unique ID
-(`PROC_PIDUNIQIDENTIFIERINFO`), read before and after `PROC_PIDT_SHORTBSDINFO`
-(parent and effective/real/saved UIDs). xnu `bsd/kern/proc_info.c` exempts both
-flavors from the same-user check that makes `PROC_PIDTBSDINFO` fail with EPERM
-for other-effective-UID processes (setuid-root `ps`/`top`, `sudo`). A unique ID
-that changes during the query is an unknown observation. UIDs are attributes,
+(xnu `bsd/kern/kern_fork.c` `forkproc()`; exec keeps it). For processes with our
+effective UID one `PROC_PIDT_BSDINFOWITHUNIQID` read returns the parent, UIDs
+and unique ID together. For other-effective-UID processes (setuid-root
+`ps`/`top`, `sudo`) that flavor fails with EPERM, so procward reads
+`PROC_PIDT_SHORTBSDINFO` between two `PROC_PIDUNIQIDENTIFIERINFO` reads; xnu
+`bsd/kern/proc_info.c` exempts both from the same-user check. A unique ID that
+changes during that query is an unknown observation. UIDs are attributes,
 not identity: when a known process execs a setuid program or calls `setuid()`,
 including after its parent exited, procward keeps it, records the new UIDs and
 restarts its ordered signals for them. Every signal still requires a fresh,

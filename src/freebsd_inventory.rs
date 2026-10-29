@@ -63,9 +63,9 @@ impl Inventory {
                     return Err(Errno::SRCH.into());
                 }
                 // kern_procctl.c reap_kill_proc_locked(): rk_fpid and EPERM record a denial only
-                // while nothing was signalled yet, so EPERM means every member was denied. A
-                // denial after a success is unnamed here; this KILL repeats each cleanup pass,
-                // and once permitted members are gone the denied one is named.
+                // while nothing was signalled yet, so EPERM means every member was denied. rustix
+                // drops rk_fpid on error, so that case is reported as (unnamed); a denied member
+                // is named only when it precedes every successful signal in the kernel walk.
                 Err(Errno::PERM) => {
                     report_denied(&mut self.2, None);
                     return Ok(());
@@ -115,11 +115,23 @@ impl Inventory {
         // kern_prot.c cr_cansignal(): with security.bsd.conservative_signals a set-ID
         // descendant accepts SIGSTOP but not SIGCONT, and PROC_REAP_KILL has no same-session
         // SIGCONT exemption. Never leave it stopped silently.
-        if let (false, Some(pid)) = (paused, denied) {
-            let pid = pid.map_or_else(|| "(unnamed)".into(), |pid| pid.to_string());
-            crate::diagnostic(format!(
-                "FreeBSD denied SIGCONT to privileged descendant {pid}; it may remain stopped"
-            ));
+        // A denial after a success is not named (kern_procctl.c), so also report every member the
+        // kernel still flags stopped (REAPER_PIDINFO_STOPPED from P_STOPPED) after the resume.
+        if !paused {
+            if let Some(pid) = denied {
+                let pid = pid.map_or_else(|| "(unnamed)".into(), |pid| pid.to_string());
+                crate::diagnostic(format!(
+                    "FreeBSD denied SIGCONT to privileged descendant {pid}; it may remain stopped"
+                ));
+            }
+            for info in process::get_reaper_pids(None)? {
+                if info.flags.contains(PidInfoFlags::STOPPED) {
+                    crate::diagnostic(format!(
+                        "FreeBSD descendant {} is still stopped after resume",
+                        info.pid
+                    ));
+                }
+            }
         }
         Ok(())
     }

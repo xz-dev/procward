@@ -84,6 +84,15 @@
   - Follow-up F4: no tests yet for the changed freeze/job-control EPERM paths (Linux/FreeBSD/macOS), including the FreeBSD resume report; they need an interactive PTY plus a setuid helper running unprivileged.
   - Follow-up F7: the boundary test does not assert that each denial line appears exactly once; FreeBSD can print both a named and an `(unnamed)` line for one process. `pid_info` is now an `unsafe fn`. The launchd comment matches xnu main `cansignal_nomac()` (`dst == initproc` returns false for every signal).
   - Green: `7cab3ea` CI 40841553666, all 12 rows (Linux/FreeBSD orphan and deadline tests, macOS unit B1 tests and the Darwin CLI suite passed).
+- [x] 6.7 Apply the focused re-review (run 9, verdict APPROVE_WITH_FOLLOWUPS on b197c0f..7e08e3b) pre-tag follow-ups.
+  - FU1: FreeBSD resume also reports every reaper member still flagged `REAPER_PIDINFO_STOPPED` after SIGCONT, because a denial after a successful signal is not named by `PROC_REAP_KILL`.
+  - FU2/FU3: FreeBSD `(unnamed)` wording (rustix drops `rk_fpid` on EPERM) and the Darwin one-read same-euid path are documented accurately.
+  - FU4: the Darwin B1 unit test signals only its own orphan, asserts removal with a message, and `PROCESS_LOCK` users recover from poisoning instead of cascading.
+  - FU7: compile-time size assert for `proc_bsdinfowithuniqid` (192 bytes).
+  - FU8: the aarch64 Windows "application endpoint leaked" failures (5 of 12 recent runs, before any Windows change) came from the ordinary-child probe testing only whether the endpoint's handle number was valid in a fresh child. The probe now duplicates the parent's endpoint and compares object identity with `CompareObjectHandles`, printing `ENDPOINT-NUMBER-REUSED` when the number names an unrelated object. A real inherited endpoint still fails.
+  - Follow-up FU5: `Target::follow` resets `denied`, so a denied macOS target that changes credentials again repeats its denial line.
+  - Follow-up FU6: the Linux/FreeBSD orphan CLI test proves kernel adoption before the exec, not procward observation; acceptable as a smoke test because those identities hold no credentials.
+  - Follow-up FU9: the Darwin normal-exit absence test still races product observation (pre-observation reparenting); it needs an observation gate rather than a readiness file.
   - Known unrelated flakes seen in this work: FreeBSD x64 PTY `background_read_after_foreground_reclaim_returns_to_cleanup` (ENXIO from `login_tty`, CI 40830633127), aarch64 Windows `application endpoint leaked` in `tests/contract.rs` (CI 40828907261 before any Windows change, 40838797327, 40839248854), and the Darwin normal-exit observation race noted above.
 
 ## 7. Integrate pi afterwards as a normal pi change

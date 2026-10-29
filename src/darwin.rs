@@ -81,6 +81,8 @@ struct BsdInfoWithUniqueId {
     bsd: libc::proc_bsdinfo,
     unique: UniqueIdentifierInfo,
 }
+// 136-byte proc_bsdinfo plus the 56-byte unique-ID record.
+const _: () = assert!(std::mem::size_of::<BsdInfoWithUniqueId>() == 192);
 
 /// # Safety
 /// `T` must be the plain-data struct the kernel writes for `flavor`.
@@ -497,7 +499,9 @@ mod tests {
     }
     #[test]
     fn setuid_root_descendant_is_observed_without_failing_refresh() {
-        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
+        let _guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // ps prints this argv, larger than any pipe buffer, so setuid-root ps stays blocked and observable.
         let mut holder = Command::new("/bin/sh")
             .args(["-c", "read line", "sh", &"x".repeat(256 * 1024)])
@@ -543,7 +547,9 @@ mod tests {
     }
     #[test]
     fn known_orphan_keeps_ownership_after_setuid_exec() {
-        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
+        let _guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("procward-darwin-orphan-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
@@ -581,12 +587,25 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         poll(|| effective_uid(pid) == Some(0));
         let refreshed = inventory.refresh();
         let after = inventory.0.get(&pid).map(|target| target.identity);
-        let killed =
+        // Signal only this test's orphan, never other children of the test process.
+        inventory.0.retain(|known, _| *known == pid);
+        let advanced =
             refreshed.is_ok() && after.is_some() && inventory.advance(Phase::Kill, None).is_ok();
+        if !advanced {
+            let _ = process::kill_process(pid, process::Signal::KILL);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut killed = false;
+        while Instant::now() < deadline {
+            if matches!(current(pid), Ok(None)) {
+                killed = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
         if !killed {
             let _ = process::kill_process(pid, process::Signal::KILL);
         }
-        poll(|| matches!(current(pid), Ok(None)));
         holder.kill().unwrap();
         holder.wait().unwrap();
         drop(intermediate);
@@ -594,7 +613,11 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         refreshed.unwrap();
         let after = after.expect("orphan was forgotten after setuid exec");
         assert_eq!((before.uid, after.uid), (process::getuid().as_raw(), 0));
-        assert!(killed, "known orphan was not signalled after setuid exec");
+        assert!(advanced, "advance failed for the known orphan");
+        assert!(
+            killed,
+            "known orphan survived advance(Kill) after its setuid exec"
+        );
     }
     #[test]
     fn denied_signal_keeps_privileged_target_as_known_survivor() {
@@ -704,7 +727,9 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
     }
     #[test]
     fn retained_observation_survives_setsid_and_reparenting_but_unseen_escape_is_explicit() {
-        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
+        let _guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut fixture = Fixture::new("observed-tree");
             let worker = fixture.remember("observed-worker");
