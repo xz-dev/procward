@@ -243,6 +243,7 @@ mod unix {
             "{}",
             run.stderr()
         );
+        eprintln!("access-boundary procward stderr: {:?}", run.stderr());
         let root = run.pids[1].1;
         poll(Duration::from_secs(3), "released root helper exit", || {
             !alive(root)
@@ -274,6 +275,52 @@ mod windows {
             thread::sleep(Duration::from_millis(5));
         }
     }
+    // Remove SeDebugPrivilege (enabled on hosted runners) so the inherited controller token
+    // obeys process DACLs like an ordinary user's token. Returns whether it was held.
+    fn drop_debug_privilege() -> bool {
+        use windows_sys::Win32::{
+            Foundation::{ERROR_NOT_ALL_ASSIGNED, GetLastError},
+            Security::{
+                AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_DEBUG_NAME,
+                SE_PRIVILEGE_REMOVED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+            },
+            System::Threading::{GetCurrentProcess, OpenProcessToken},
+        };
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token),
+                0
+            );
+            let mut privileges = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: std::mem::zeroed(),
+                    Attributes: SE_PRIVILEGE_REMOVED,
+                }],
+            };
+            assert_ne!(
+                LookupPrivilegeValueW(
+                    std::ptr::null(),
+                    SE_DEBUG_NAME,
+                    &mut privileges.Privileges[0].Luid
+                ),
+                0
+            );
+            let adjusted = AdjustTokenPrivileges(
+                token,
+                0,
+                &privileges,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let held = adjusted != 0 && GetLastError() != ERROR_NOT_ALL_ASSIGNED;
+            assert_ne!(adjusted, 0, "{}", std::io::Error::last_os_error());
+            CloseHandle(token);
+            held
+        }
+    }
     struct Run {
         child: Child,
         dir: PathBuf,
@@ -301,6 +348,11 @@ mod windows {
 
     #[test]
     fn descendant_denying_controller_access_keeps_status_and_job_cleanup() {
+        // This binary's only Windows test, so the token change cannot affect other tests.
+        eprintln!(
+            "SeDebugPrivilege removed before launch: {}",
+            drop_debug_privilege()
+        );
         let dir = std::env::temp_dir().join(format!("procward-boundary-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         let fixture = std::env::current_exe()
