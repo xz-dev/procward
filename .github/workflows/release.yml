@@ -339,7 +339,15 @@ jobs:
           gh release edit "$RELEASE_TAG" --draft=false
       - name: Verify published immutable release and every downloadable asset
         run: |
-          gh release verify "$RELEASE_TAG"
+          # GitHub may report the new release attestation as missing for a short time; retry only that.
+          deadline=$((SECONDS + 300))
+          until output=$(gh release verify "$RELEASE_TAG" 2>&1); do
+            echo "$output"
+            case "$output" in *"no attestations"*) ;; *) exit 1 ;; esac
+            if [ "$SECONDS" -ge "$deadline" ]; then exit 1; fi
+            sleep 10
+          done
+          echo "$output"
           for asset in artifacts/*/*.zip artifacts/SHA256SUMS; do
             gh release verify-asset "$RELEASE_TAG" "$asset"
             gh attestation verify "$asset" --repo "$GH_REPO" \

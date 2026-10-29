@@ -152,7 +152,10 @@ tag fails before building. No previously uploaded branch artifact is reused.
    existing tag with all 24 zips plus `SHA256SUMS`, then publishes the draft.
 6. After publication it runs `gh release verify`, `gh release verify-asset` for
    every downloadable asset, and source-pinned `gh attestation verify` again.
-   Any failure fails the workflow loudly; it does not overwrite/recreate assets.
+   Only a `no attestations` result from `gh release verify` (GitHub's release
+   attestation propagation delay, seen in v0.1.0 run 40729063671) is retried, for
+   at most 5 minutes. Any other or persisting failure fails the workflow loudly;
+   it does not overwrite/recreate assets.
 
 The automatic GitHub immutable-release attestation binds the tag, commit and
 release assets; it complements build provenance. Assets/tag are locked, not
