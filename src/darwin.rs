@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use crate::policy::{Phase, Progress, SignalIdentity};
-use libproc::{
-    bsd_info::BSDInfo,
-    proc_pid::pidinfo,
-    processes::{ProcFilter, pids_by_type},
-};
+use libproc::processes::{ProcFilter, pids_by_type};
 use rustix::{
     io::Errno,
     process::{self, Pid},
@@ -14,11 +10,11 @@ use std::{
     io,
 };
 
+// PID plus the never-reused per-boot unique ID name one process; UIDs can change under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Identity {
     pid: u32,
-    seconds: u64,
-    micros: u64,
+    birth: u64,
     uid: u32,
     real_uid: u32,
     saved_uid: u32,
@@ -27,27 +23,36 @@ impl Identity {
     fn signal_identity(self) -> SignalIdentity {
         [
             u64::from(self.pid),
-            self.seconds,
-            self.micros,
+            self.birth,
+            0,
             (u64::from(self.uid) << 32) | u64::from(self.real_uid),
             u64::from(self.saved_uid),
         ]
     }
-    fn from_info(info: &BSDInfo) -> Self {
-        Self {
-            pid: info.pbi_pid,
-            seconds: info.pbi_start_tvsec,
-            micros: info.pbi_start_tvusec,
-            uid: info.pbi_uid,
-            real_uid: info.pbi_ruid,
-            saved_uid: info.pbi_svuid,
-        }
+    fn same_process(self, other: Self) -> bool {
+        (self.pid, self.birth) == (other.pid, other.birth)
     }
 }
 struct Target {
     identity: Identity,
     term_sent: bool,
     denied: bool,
+}
+impl Target {
+    // setuid exec or setuid() changes credentials, not ownership: keep the target, re-sign it.
+    fn follow(&mut self, now: Identity) -> bool {
+        if !self.identity.same_process(now) {
+            return false;
+        }
+        if self.identity != now {
+            *self = Target {
+                identity: now,
+                term_sent: false,
+                denied: false,
+            };
+        }
+        true
+    }
 }
 pub struct Inventory(HashMap<Pid, Target>, HashSet<Pid>, Progress);
 
@@ -69,13 +74,13 @@ struct UniqueIdentifierInfo {
     reserved: [u64; 2],
 }
 const _: () = assert!(std::mem::size_of::<UniqueIdentifierInfo>() == 56);
-// Kernel start microseconds never reach this, so unique-ID and start-time births never compare equal.
-const UNIQUE_ID_BIRTH: u64 = u64::MAX;
 
-fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
+/// # Safety
+/// `T` must be the plain-data struct the kernel writes for `flavor`.
+unsafe fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
     let mut info = std::mem::MaybeUninit::<T>::zeroed();
     let size = std::mem::size_of::<T>() as libc::c_int;
-    // SAFETY: T is a plain-data proc_info struct; the kernel writes at most `size` bytes.
+    // SAFETY: the kernel writes at most `size` bytes into the zeroed buffer.
     let written = unsafe {
         libc::proc_pidinfo(
             pid.as_raw_nonzero().get(),
@@ -92,13 +97,18 @@ fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
     }
 }
 
-// xnu bsd/kern/proc_info.c proc_pidinfo_internal(): PROC_PIDTBSDINFO requires the caller's
-// effective UID (EPERM otherwise); SHORTBSDINFO and UNIQIDENTIFIERINFO skip that check.
-fn other_euid_query(pid: Pid) -> io::Result<(Identity, u32)> {
-    let before = pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
-    let info = pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)?;
-    let after = pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
-    // The never-reused per-boot unique ID on both sides binds the credentials to one process.
+// xnu bsd/kern/proc_info.c proc_pidinfo_internal(): SHORTBSDINFO and UNIQIDENTIFIERINFO skip
+// the same-user check that makes PROC_PIDTBSDINFO fail with EPERM for other-euid processes.
+fn identify(pid: Pid) -> io::Result<(Identity, u32)> {
+    // SAFETY: each flavor is paired with its xnu struct.
+    let (before, info, after) = unsafe {
+        (
+            pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?,
+            pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)?,
+            pid_info::<UniqueIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?,
+        )
+    };
+    // The unique ID on both sides binds the short record to one process.
     if before.unique_id != after.unique_id {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -113,8 +123,7 @@ fn other_euid_query(pid: Pid) -> io::Result<(Identity, u32)> {
     Ok((
         Identity {
             pid: info.pbsi_pid,
-            seconds: before.unique_id,
-            micros: UNIQUE_ID_BIRTH,
+            birth: before.unique_id,
             uid: info.pbsi_uid,
             real_uid: info.pbsi_ruid,
             saved_uid: info.pbsi_svuid,
@@ -124,26 +133,10 @@ fn other_euid_query(pid: Pid) -> io::Result<(Identity, u32)> {
 }
 
 fn query(pid: Pid) -> io::Result<Option<(Identity, u32)>> {
-    let raw = pid.as_raw_nonzero().get();
-    let error = match pidinfo::<BSDInfo>(raw, 0) {
-        Ok(info) if info.pbi_pid == raw as u32 => {
-            return Ok(Some((Identity::from_info(&info), info.pbi_ppid)));
-        }
-        Ok(_) => {
-            return Err(io::Error::other(
-                "libproc returned a mismatched process PID",
-            ));
-        }
-        Err(_) => io::Error::from_raw_os_error(errno::errno().0),
-    };
-    let error = if error.raw_os_error() == Some(Errno::PERM.raw_os_error()) {
-        match other_euid_query(pid) {
-            Ok(found) => return Ok(Some(found)),
-            Err(error) if error.raw_os_error().is_none() => return Err(error),
-            Err(error) => error,
-        }
-    } else {
-        error
+    let error = match identify(pid) {
+        Ok(found) => return Ok(Some(found)),
+        Err(error) if error.raw_os_error().is_none() => return Err(error),
+        Err(error) => error,
     };
     match process::test_kill_process(pid) {
         Err(Errno::SRCH) => Ok(None),
@@ -214,10 +207,10 @@ impl Inventory {
                 Err(error) => return Err(error),
             };
             if parent != root
-                && self
+                && !self
                     .0
-                    .get(&parent)
-                    .is_none_or(|target| target.identity != before)
+                    .get_mut(&parent)
+                    .is_some_and(|target| target.follow(before))
             {
                 self.0.remove(&parent);
                 continue;
@@ -242,7 +235,7 @@ impl Inventory {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
-            if after != Some(before) {
+            if !after.is_some_and(|after| after.same_process(before)) {
                 continue;
             }
             for (pid, identity) in observed {
@@ -252,7 +245,7 @@ impl Inventory {
                     term_sent: false,
                     denied: false,
                 });
-                if entry.identity != identity {
+                if !entry.follow(identity) {
                     *entry = Target {
                         identity,
                         term_sent: false,
@@ -275,7 +268,7 @@ impl Inventory {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(error) => return Err(error),
             };
-            if now != Some(target.identity) {
+            if !now.is_some_and(|now| target.follow(now)) {
                 gone.push(*pid);
                 continue;
             }
@@ -294,6 +287,8 @@ impl Inventory {
                     process::kill_process(*pid, *signal).map_err(io::Error::from)
                 }) {
                     Ok(true) => {}
+                    // Changed credentials only: the next pass re-signs the same process.
+                    Ok(false) if now.is_some_and(|now| target.identity.same_process(now)) => break,
                     Ok(false) => {
                         gone.push(*pid);
                         break;
@@ -459,7 +454,8 @@ mod tests {
         }
     }
     fn effective_uid(pid: Pid) -> Option<u32> {
-        pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)
+        // SAFETY: SHORTBSDINFO writes proc_bsdshortinfo.
+        unsafe { pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO) }
             .ok()
             .map(|info| info.pbsi_uid)
     }
@@ -499,8 +495,13 @@ mod tests {
                 process::getuid().as_raw()
             )
         );
+        let unique = unsafe {
+            pid_info::<UniqueIdentifierInfo>(process::getpid(), PROC_PIDUNIQIDENTIFIERINFO)
+        }
+        .unwrap();
         assert_eq!(
-            observed.micros, UNIQUE_ID_BIRTH,
+            current(process::getpid()).unwrap().unwrap().birth,
+            unique.unique_id,
             "birth must be the unique ID"
         );
     }
@@ -578,6 +579,31 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         assert!(!inventory.is_empty(), "unsignalable survivor was dropped");
     }
     #[test]
+    fn credential_change_follows_the_same_process_but_never_a_new_birth() {
+        let saved = Identity {
+            pid: 42,
+            birth: 100,
+            uid: 501,
+            real_uid: 501,
+            saved_uid: 501,
+        };
+        let mut target = Target {
+            identity: saved,
+            term_sent: true,
+            denied: true,
+        };
+        let root = Identity { uid: 0, ..saved };
+        assert!(target.follow(root));
+        assert_eq!(target.identity, root);
+        assert!(
+            !target.term_sent && !target.denied,
+            "new credentials need fresh signals"
+        );
+        assert!(!target.follow(Identity { birth: 101, ..root }));
+        assert!(!target.follow(Identity { pid: 43, ..root }));
+        assert_eq!(target.identity, root);
+    }
+    #[test]
     fn unknown_observation_blocks_completion_without_signal_authority() {
         let mut inventory = Inventory::new();
         inventory.1.insert(process::getpid());
@@ -589,8 +615,7 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
     fn changed_birth_pid_or_credentials_and_unknown_queries_never_authorize_signal() {
         let saved = Identity {
             pid: 42,
-            seconds: 100,
-            micros: 10,
+            birth: 100,
             uid: 501,
             real_uid: 501,
             saved_uid: 501,
@@ -598,11 +623,7 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         for current in [
             Identity { pid: 43, ..saved },
             Identity {
-                micros: 11,
-                ..saved
-            },
-            Identity {
-                seconds: 101,
+                birth: 101,
                 ..saved
             },
             Identity { uid: 0, ..saved },

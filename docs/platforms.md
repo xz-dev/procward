@@ -183,17 +183,23 @@ requires the count to remain one through fallback and final cleanup.
 macOS keeps an ESRCH-with-existing-PID identity transition as unknown, not gone:
 it neither signals from that observation nor completes while it remains pending.
 
-A descendant with another effective UID (setuid-root `ps`/`top`, `sudo`) denies
-`PROC_PIDTBSDINFO` with EPERM. xnu `bsd/kern/proc_info.c` exempts
-`PROC_PIDT_SHORTBSDINFO` and `PROC_PIDUNIQIDENTIFIERINFO` from that same-user
-check, so procward reads PID, parent and effective/real/saved UIDs from the short
-record between two reads of the per-boot, never-reused process unique ID. That
-unique ID replaces start time as the birth identity; a changed ID is an unknown
-observation, not identity. If `kill(2)` itself returns EPERM (real and saved UIDs
-no longer match the caller, for example after `sudo` switches users), procward
-reports the descendant once as a known survivor it cannot signal. It still blocks
-completion, and the cleanup deadline fails if it remains. Job-control freeze
-cannot stop such a descendant. Other denied or failed queries remain errors.
+macOS identifies every process by PID plus its per-boot, never-reused unique ID
+(`PROC_PIDUNIQIDENTIFIERINFO`), read before and after `PROC_PIDT_SHORTBSDINFO`
+(parent and effective/real/saved UIDs). xnu `bsd/kern/proc_info.c` exempts both
+flavors from the same-user check that makes `PROC_PIDTBSDINFO` fail with EPERM
+for other-effective-UID processes (setuid-root `ps`/`top`, `sudo`). A unique ID
+that changes during the query is an unknown observation. UIDs are attributes,
+not identity: when a known process execs a setuid program or calls `setuid()`,
+including after its parent exited, procward keeps it, records the new UIDs and
+restarts its ordered signals for them. Every signal still requires a fresh,
+fully matching PID, unique ID and UIDs. If `kill(2)` returns EPERM (real and
+saved UIDs no longer match the caller, for example after `sudo` switches users),
+procward reports the descendant once as a known survivor it cannot signal. It
+still blocks completion, and the cleanup deadline fails if it remains.
+Job-control freeze cannot stop such a descendant. Other denied or failed
+queries remain errors. Linux (pidfd plus `/proc` start time) and FreeBSD (PID
+plus `ki_start`) never include credentials in identity, so a credential change
+cannot drop a known descendant there.
 
 FreeBSD KILL ESRCH is tolerated only when a fresh kernel list proves no signalable member remains; wait/reaper facts,
 not that signal result, still decide completion.
