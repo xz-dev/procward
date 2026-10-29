@@ -92,8 +92,18 @@
   - FU8: the aarch64 Windows "application endpoint leaked" failures (5 of 12 recent runs, before any Windows change) came from the ordinary-child probe testing only whether the endpoint's handle number was valid in a fresh child. The probe now duplicates the parent's endpoint and compares object identity with `CompareObjectHandles`, printing `ENDPOINT-NUMBER-REUSED` when the number names an unrelated object. A real inherited endpoint still fails.
   - Follow-up FU5: `Target::follow` resets `denied`, so a denied macOS target that changes credentials again repeats its denial line.
   - Follow-up FU6: the Linux/FreeBSD orphan CLI test proves kernel adoption before the exec, not procward observation; acceptable as a smoke test because those identities hold no credentials.
+  - Follow-up (parent pre-tag review): on FreeBSD the FU1 `get_reaper_pids` query inside resume propagates its error, so a failure of that query now fails the resume closed instead of only reporting it.
   - Follow-up FU9: the Darwin normal-exit absence test still races product observation (pre-observation reparenting); it needs an observation gate rather than a readiness file.
   - Known unrelated flakes seen in this work: FreeBSD x64 PTY `background_read_after_foreground_reclaim_returns_to_cleanup` (ENXIO from `login_tty`, CI 40830633127), aarch64 Windows `application endpoint leaked` in `tests/contract.rs` (CI 40828907261 before any Windows change, 40838797327, 40839248854), and the Darwin normal-exit observation race noted above.
+- [x] 6.8 Release v0.1.1.
+  - Tag: unsigned annotated tag `v0.1.1` (tag object 5019d56d) on bb134c8. Before tagging: CI 40853584927 green 12/12, the parent reviewed the bb134c8 delta, and release immutability was enabled.
+  - Release: run 40856581200 succeeded, including the in-workflow post-publication verification with its bounded attestation retry. https://github.com/xz-dev/procward/releases/tag/v0.1.1 is immutable, not a draft, and has 25 assets.
+  - Independent parent verification in /var/tmp/pw-verify011-DgVEca:
+    - `gh release verify` and `verify-asset` pass for all 25 assets.
+    - `gh attestation verify` passes for all 24 zips, with signer workflow release.yml, source ref refs/tags/v0.1.1 and source digest bb134c8.
+    - `sha256sum -c` gives 24/24.
+    - Each Linux x64 zip holds exactly 4 entries; musl is static-pie and GNU is dynamically linked.
+    - Both binaries report `procward 0.1.1`; `run -- true` returns 0 and `run -- sh -c 'exit 7'` returns 7.
 
 ## 7. Integrate pi afterwards as a normal pi change
 
