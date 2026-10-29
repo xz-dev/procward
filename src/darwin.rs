@@ -74,6 +74,13 @@ struct UniqueIdentifierInfo {
     reserved: [u64; 2],
 }
 const _: () = assert!(std::mem::size_of::<UniqueIdentifierInfo>() == 56);
+// proc_info_private.h struct proc_bsdinfowithuniqid: one same-user read of both records.
+const PROC_PIDT_BSDINFOWITHUNIQID: libc::c_int = 18;
+#[repr(C)]
+struct BsdInfoWithUniqueId {
+    bsd: libc::proc_bsdinfo,
+    unique: UniqueIdentifierInfo,
+}
 
 /// # Safety
 /// `T` must be the plain-data struct the kernel writes for `flavor`.
@@ -97,9 +104,38 @@ unsafe fn pid_info<T>(pid: Pid, flavor: libc::c_int) -> io::Result<T> {
     }
 }
 
-// xnu bsd/kern/proc_info.c proc_pidinfo_internal(): SHORTBSDINFO and UNIQIDENTIFIERINFO skip
-// the same-user check that makes PROC_PIDTBSDINFO fail with EPERM for other-euid processes.
+// xnu bsd/kern/kern_fork.c forkproc(): p_uniqueid = ++nextuniqueid, never reused this boot;
+// an exec copy of the proc keeps it. Same-euid processes need one read; for others xnu
+// bsd/kern/proc_info.c proc_pidinfo_internal() denies BSDINFO* with EPERM but serves
+// SHORTBSDINFO and UNIQIDENTIFIERINFO without the same-user check.
 fn identify(pid: Pid) -> io::Result<(Identity, u32)> {
+    // SAFETY: BSDINFOWITHUNIQID writes proc_bsdinfowithuniqid.
+    match unsafe { pid_info::<BsdInfoWithUniqueId>(pid, PROC_PIDT_BSDINFOWITHUNIQID) } {
+        Ok(info) => {
+            if info.bsd.pbi_pid != pid.as_raw_nonzero().get() as u32 {
+                return Err(io::Error::other(
+                    "proc_pidinfo returned a mismatched process PID",
+                ));
+            }
+            Ok((
+                Identity {
+                    pid: info.bsd.pbi_pid,
+                    birth: info.unique.unique_id,
+                    uid: info.bsd.pbi_uid,
+                    real_uid: info.bsd.pbi_ruid,
+                    saved_uid: info.bsd.pbi_svuid,
+                },
+                info.bsd.pbi_ppid,
+            ))
+        }
+        Err(error) if error.raw_os_error() == Some(Errno::PERM.raw_os_error()) => {
+            identify_short(pid)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn identify_short(pid: Pid) -> io::Result<(Identity, u32)> {
     // SAFETY: each flavor is paired with its xnu struct.
     let (before, info, after) = unsafe {
         (
@@ -577,6 +613,11 @@ while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
         inventory.advance(Phase::Kill, None).unwrap();
         assert!(inventory.0[&launchd].denied);
         assert!(!inventory.is_empty(), "unsignalable survivor was dropped");
+    }
+    #[test]
+    fn same_user_and_other_user_paths_report_one_identity() {
+        let me = process::getpid();
+        assert_eq!(identify(me).unwrap(), identify_short(me).unwrap());
     }
     #[test]
     fn credential_change_follows_the_same_process_but_never_a_new_birth() {
