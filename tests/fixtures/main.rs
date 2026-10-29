@@ -159,6 +159,32 @@ fn main() {
         }
         "exit" => process::exit(args[2].to_str().unwrap().parse::<u32>().unwrap() as i32),
         "touch" => fs::write(&args[2], b"payload ran").unwrap(),
+        "await" => wait_for(Path::new(&args[2])),
+        // Installed setuid root: "keep" retains the caller's real UID (like ps), "root"
+        // becomes fully root (like sudo); "nondumpable" runs unprivileged.
+        #[cfg(unix)]
+        "boundary" => {
+            let dir = Path::new(&args[2]);
+            let kind = args[3].to_str().unwrap();
+            if kind == "root" && rustix::process::geteuid().is_root() {
+                // POSIX: a privileged setuid() sets real, effective and saved UIDs.
+                assert_eq!(unsafe { libc::setuid(0) }, 0);
+            }
+            #[cfg(target_os = "linux")]
+            if kind == "nondumpable" {
+                assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) }, 0);
+            }
+            let record = dir.join(format!("{kind}.tmp"));
+            let ids = unsafe { (libc::getuid(), libc::geteuid()) };
+            fs::write(&record, format!("{} {} {}", process::id(), ids.0, ids.1)).unwrap();
+            fs::rename(record, dir.join(format!("{kind}.pid"))).unwrap();
+            loop {
+                if kind == "root" && dir.join("release").exists() {
+                    process::exit(0);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
         mode => {
             let dir = Path::new(&args[2]);
             fs::write(dir.join(format!("{mode}.pid")), process::id().to_string()).unwrap();

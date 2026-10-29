@@ -29,6 +29,10 @@ name = "windows"
 path = "tests/windows.rs"
 
 [[test]]
+name = "boundary"
+path = "tests/boundary.rs"
+
+[[test]]
 name = "darwin"
 path = "tests/darwin.rs"
 
