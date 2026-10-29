@@ -13,7 +13,9 @@ Final documentation/release setup remains pending.
 ## Descendants across an access boundary
 
 A descendant may deny the controller access, for example a setuid-root program.
-On every backend procward keeps the payload status and kills what the OS allows.
+On every backend procward kills what the OS allows. It keeps the payload status
+only if denied descendants exit before the cleanup deadline; otherwise it exits
+125.
 `tests/boundary.rs` runs this family on all twelve CI rows. On Unix it installs
 the fixture setuid root (as root, or with passwordless `sudo -n`) and runs
 procward unprivileged: one helper keeps our real UID like `ps`, one becomes
@@ -28,11 +30,27 @@ own process DACL to deny Everyone.
   as `sudo` does, returns EPERM. FreeBSD's default
   `security.bsd.conservative_signals` also limits signals to set-ID processes.
 - **Unix denial:** each backend reports `<OS> denied signals to privileged
-  descendant <pid>; it remains a known survivor` once. The descendant still
-  blocks completion; if it remains at the cleanup deadline, cleanup fails
-  instead of claiming containment. Job-control freeze skips it. Other errors stay
-  fatal. FreeBSD's `PROC_REAP_KILL` signals every permitted member and reports
-  only the first denial (`kern_procctl.c`).
+  descendant <pid>; it remains a known survivor` once per descendant. The
+  descendant still blocks completion; if it remains at the cleanup deadline,
+  cleanup fails with `cleanup deadline expired` and exit 125 instead of claiming
+  containment (tested). Job-control freeze cannot stop it. Other errors stay
+  fatal. FreeBSD's `PROC_REAP_KILL` signals every permitted member but names a
+  denied one only if nothing was signalled before it (`kern_procctl.c`
+  `reap_kill_proc_locked`); cleanup repeats the KILL each pass, so the denial is
+  named once the permitted members are gone, possibly as `(unnamed)` when every
+  member was denied.
+- **FreeBSD resume:** with the default `security.bsd.conservative_signals=1`,
+  `cr_cansignal` lets SIGSTOP but not SIGCONT reach a set-ID descendant, and
+  `PROC_REAP_KILL` has no same-session SIGCONT exemption. Job-control resume
+  then reports `FreeBSD denied SIGCONT to privileged descendant <pid>; it may
+  remain stopped` instead of resuming silently. Linux and macOS allow SIGCONT
+  whenever SIGSTOP was allowed (same UID rule, plus a same-session SIGCONT
+  exemption).
+- **Credential changes:** a known descendant that later execs a setuid program
+  stays owned on every Unix backend. Linux and FreeBSD identities hold no
+  credentials, and macOS updates the UIDs of the same unique ID. Tests cover an
+  orphan that execs the setuid helper after adoption (Linux/FreeBSD CLI, macOS
+  inventory).
 - **Inventory:** Linux pidfds (`pidfd_open`) and `/proc/<pid>/stat` stay
   available for other-UID and non-dumpable processes on default procfs mounts;
   `hidepid` mounts are outside this guarantee. FreeBSD `kern.proc.pid` needs the

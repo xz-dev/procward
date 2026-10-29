@@ -15,7 +15,7 @@ pub struct Inventory(
     HashSet<Option<Pid>>,
 );
 
-// cr_cansignal()/p_cansignal() EPERM: still owned and awaited, never treated as gone.
+// cr_cansignal()/p_cansignal() refusal: still owned and awaited, never treated as gone.
 fn report_denied(reported: &mut HashSet<Option<Pid>>, pid: Option<Pid>) {
     if reported.insert(pid) {
         let pid = pid.map_or_else(|| "(unnamed)".into(), |pid| pid.to_string());
@@ -62,13 +62,18 @@ impl Inventory {
                     }
                     return Err(Errno::SRCH.into());
                 }
-                // kern_procctl.c reap_kill: EPERM only when a denial was the last outcome.
+                // kern_procctl.c reap_kill_proc_locked(): rk_fpid and EPERM record a denial only
+                // while nothing was signalled yet, so EPERM means every member was denied. A
+                // denial after a success is unnamed here; this KILL repeats each cleanup pass,
+                // and once permitted members are gone the denied one is named.
                 Err(Errno::PERM) => {
                     report_denied(&mut self.2, None);
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
             };
+            // rk_fpid comes from any cr_cansignal() refusal (also prison/see_other_uids
+            // visibility), all access-control decisions, so it is reported as a denial.
             if result.first_failed.is_some() {
                 report_denied(&mut self.2, result.first_failed);
             }
@@ -102,10 +107,21 @@ impl Inventory {
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
         let signal = if paused { Signal::STOP } else { Signal::CONT };
         // Job control cannot stop a descendant the OS forbids this user to signal.
-        match process::reaper_kill(None, signal, false, None) {
-            Ok(_) | Err(Errno::PERM) => Ok(()),
-            Err(error) => Err(error.into()),
+        let denied = match process::reaper_kill(None, signal, false, None) {
+            Ok(result) => result.first_failed.map(Some),
+            Err(Errno::PERM) => Some(None),
+            Err(error) => return Err(error.into()),
+        };
+        // kern_prot.c cr_cansignal(): with security.bsd.conservative_signals a set-ID
+        // descendant accepts SIGSTOP but not SIGCONT, and PROC_REAP_KILL has no same-session
+        // SIGCONT exemption. Never leave it stopped silently.
+        if let (false, Some(pid)) = (paused, denied) {
+            let pid = pid.map_or_else(|| "(unnamed)".into(), |pid| pid.to_string());
+            crate::diagnostic(format!(
+                "FreeBSD denied SIGCONT to privileged descendant {pid}; it may remain stopped"
+            ));
         }
+        Ok(())
     }
 
     pub fn forget(&mut self, pid: Pid) {
