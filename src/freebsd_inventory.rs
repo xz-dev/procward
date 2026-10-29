@@ -4,13 +4,30 @@ use rustix::{
     io::Errno,
     process::{self, Pid, PidInfoFlags, Signal},
 };
-use std::{collections::HashMap, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
-pub struct Inventory(HashMap<Pid, (bool, SignalIdentity)>, Progress);
+pub struct Inventory(
+    HashMap<Pid, (bool, SignalIdentity)>,
+    Progress,
+    HashSet<Option<Pid>>,
+);
+
+// cr_cansignal()/p_cansignal() EPERM: still owned and awaited, never treated as gone.
+fn report_denied(reported: &mut HashSet<Option<Pid>>, pid: Option<Pid>) {
+    if reported.insert(pid) {
+        let pid = pid.map_or_else(|| "(unnamed)".into(), |pid| pid.to_string());
+        crate::diagnostic(format!(
+            "FreeBSD denied signals to privileged descendant {pid}; it remains a known survivor"
+        ));
+    }
+}
 
 impl Inventory {
     pub fn new() -> Self {
-        Self(HashMap::new(), Progress::default())
+        Self(HashMap::new(), Progress::default(), HashSet::new())
     }
 
     pub fn progress(&mut self) -> &mut Progress {
@@ -45,12 +62,15 @@ impl Inventory {
                     }
                     return Err(Errno::SRCH.into());
                 }
+                // kern_procctl.c reap_kill: EPERM only when a denial was the last outcome.
+                Err(Errno::PERM) => {
+                    report_denied(&mut self.2, None);
+                    return Ok(());
+                }
                 Err(error) => return Err(error.into()),
             };
-            if let Some(pid) = result.first_failed {
-                return Err(io::Error::other(format!(
-                    "FreeBSD reaper failed to signal {pid}"
-                )));
+            if result.first_failed.is_some() {
+                report_denied(&mut self.2, result.first_failed);
             }
             return Ok(());
         }
@@ -62,6 +82,10 @@ impl Inventory {
             for signal in self.1.signals(phase, *identity, sent)? {
                 match process::kill_process(*pid, *signal) {
                     Ok(()) | Err(Errno::SRCH) => {}
+                    Err(Errno::PERM) => {
+                        report_denied(&mut self.2, Some(*pid));
+                        break;
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -77,17 +101,16 @@ impl Inventory {
 
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
         let signal = if paused { Signal::STOP } else { Signal::CONT };
-        let result = process::reaper_kill(None, signal, false, None)?;
-        if let Some(pid) = result.first_failed {
-            return Err(io::Error::other(format!(
-                "FreeBSD reaper failed to signal {pid}"
-            )));
+        // Job control cannot stop a descendant the OS forbids this user to signal.
+        match process::reaper_kill(None, signal, false, None) {
+            Ok(_) | Err(Errno::PERM) => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     pub fn forget(&mut self, pid: Pid) {
         self.0.remove(&pid);
+        self.2.remove(&Some(pid));
     }
 }
 

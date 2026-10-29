@@ -170,3 +170,72 @@ pub fn console_host(procward: &OsStr, dir: &Path) {
     }
     process::exit(23);
 }
+
+pub fn boundary_tree(dir: &Path) {
+    let _helper = Command::new(std::env::current_exe().unwrap())
+        .arg("boundary-deny")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    super::wait_for(&dir.join("go"));
+    process::exit(23);
+}
+
+// Replace this process object's DACL so Everyone, including the controller, is denied.
+pub fn deny_self(dir: &Path) {
+    use windows_sys::Win32::{
+        Security::{
+            ACL, ACL_REVISION, AddAccessDeniedAce, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+            InitializeAcl, InitializeSecurityDescriptor, SECURITY_DESCRIPTOR,
+            SECURITY_MAX_SID_SIZE, SetKernelObjectSecurity, SetSecurityDescriptorDacl, WinWorldSid,
+        },
+        System::Threading::{GetCurrentProcess, PROCESS_ALL_ACCESS},
+    };
+    let record = dir.join("deny.tmp");
+    fs::write(&record, process::id().to_string()).unwrap();
+    fs::rename(record, dir.join("deny.pid")).unwrap();
+    super::wait_for(&dir.join("apply"));
+    let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut sid_size = sid.len() as u32;
+    let mut acl = [0u64; 32];
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let descriptor_ptr = (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast();
+    unsafe {
+        assert_ne!(
+            CreateWellKnownSid(
+                WinWorldSid,
+                std::ptr::null_mut(),
+                sid.as_mut_ptr().cast(),
+                &mut sid_size
+            ),
+            0
+        );
+        let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
+        assert_ne!(InitializeAcl(acl_ptr, 256, ACL_REVISION), 0);
+        assert_ne!(
+            AddAccessDeniedAce(
+                acl_ptr,
+                ACL_REVISION,
+                PROCESS_ALL_ACCESS,
+                sid.as_mut_ptr().cast()
+            ),
+            0
+        );
+        // SECURITY_DESCRIPTOR_REVISION is 1.
+        assert_ne!(InitializeSecurityDescriptor(descriptor_ptr, 1), 0);
+        assert_ne!(SetSecurityDescriptorDacl(descriptor_ptr, 1, acl_ptr, 0), 0);
+        assert_ne!(
+            SetKernelObjectSecurity(
+                GetCurrentProcess(),
+                DACL_SECURITY_INFORMATION,
+                descriptor_ptr
+            ),
+            0
+        );
+    }
+    fs::write(dir.join("denied"), b"denied").unwrap();
+    loop {
+        thread::park();
+    }
+}

@@ -5,10 +5,45 @@ Final documentation/release setup remains pending.
 
 | Backend | Authority and completion | Limits |
 | --- | --- | --- |
-| Linux | Subreaper ancestry, birth-checked pidfds or unreaped direct-child authority; wait until ECHILD | Missing pidfds visibly limit nondirect freezing, not direct-child reaper cleanup |
-| FreeBSD | Acquired procctl reaper domain, fresh status/pids, nested-reaper subtree KILL and child waits | Required targeted wake/query/signal errors fail startup or cleanup; no sysctl/module changes |
-| Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised |
+| Linux | Subreaper ancestry, birth-checked pidfds or unreaped direct-child authority; wait until ECHILD | Missing pidfds visibly limit nondirect freezing, not direct-child reaper cleanup; descendants the OS forbids this user to signal stay known survivors |
+| FreeBSD | Acquired procctl reaper domain, fresh status/pids, nested-reaper subtree KILL and child waits | Required targeted wake/query/signal errors fail startup or cleanup, except signal EPERM: such descendants stay known survivors; no sysctl/module changes |
+| Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised; Job termination does not depend on descendant process DACLs |
 | macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape; descendants the OS forbids this user to signal stay known survivors |
+
+## Descendants across an access boundary
+
+A descendant may deny the controller access, for example a setuid-root program.
+On every backend procward keeps the payload status and kills what the OS allows.
+`tests/boundary.rs` runs this family on all twelve CI rows. On Unix it installs
+the fixture setuid root (as root, or with passwordless `sudo -n`) and runs
+procward unprivileged: one helper keeps our real UID like `ps`, one becomes
+fully root like `sudo`, and on Linux one unprivileged helper becomes
+non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`). On Windows a descendant replaces its
+own process DACL to deny Everyone.
+
+- **Signal permission:** a sender may signal a target only when its real or
+  effective UID matches the target's real or saved UID (POSIX `kill(2)`; Linux
+  `kill_ok_by_cred`, FreeBSD `cr_cansignal`, xnu `cansignal_nomac`). A setuid
+  program that keeps our real UID stays signalable. One that switched all UIDs,
+  as `sudo` does, returns EPERM. FreeBSD's default
+  `security.bsd.conservative_signals` also limits signals to set-ID processes.
+- **Unix denial:** each backend reports `<OS> denied signals to privileged
+  descendant <pid>; it remains a known survivor` once. The descendant still
+  blocks completion; if it remains at the cleanup deadline, cleanup fails
+  instead of claiming containment. Job-control freeze skips it. Other errors stay
+  fatal. FreeBSD's `PROC_REAP_KILL` signals every permitted member and reports
+  only the first denial (`kern_procctl.c`).
+- **Inventory:** Linux pidfds (`pidfd_open`) and `/proc/<pid>/stat` stay
+  available for other-UID and non-dumpable processes on default procfs mounts;
+  `hidepid` mounts are outside this guarantee. FreeBSD `kern.proc.pid` needs the
+  default `security.bsd.see_other_uids=1`. macOS uses the other-effective-UID
+  path described in the cleanup section below.
+- **Windows:** the Job object terminates members without opening their process
+  handles, so a descendant's DACL cannot exempt it. The test proves the boundary
+  by requiring `OpenProcess` to fail with `ERROR_ACCESS_DENIED`. A
+  higher-integrity child would need an elevated launcher; it is not tested.
+- **qemu-user:** if binfmt does not honour the setuid bit, the riscv64 rows
+  report a counted `EMULATOR-UNSUPPORTED` reason instead of a pass.
 
 Linux/FreeBSD have a shell-facing owner and a reaper anchor. Noninteractive
 anchors use a separate process group; interactive native roles share the caller's

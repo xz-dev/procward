@@ -62,6 +62,10 @@ fn main() {
         #[cfg(windows)]
         "conpty-bootstrap" => windows::conpty_bootstrap(&args[2]),
         #[cfg(windows)]
+        "boundary-tree" => windows::boundary_tree(Path::new(&args[2])),
+        #[cfg(windows)]
+        "boundary-deny" => windows::deny_self(Path::new(&args[2])),
+        #[cfg(windows)]
         "console" => windows::interactive(),
         #[cfg(windows)]
         "console-host" => windows::console_host(&args[2], Path::new(&args[3])),

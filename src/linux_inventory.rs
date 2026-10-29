@@ -16,6 +16,7 @@ struct Target {
     fd: Option<OwnedFd>,
     identity: crate::policy::SignalIdentity,
     term_sent: bool,
+    denied: bool,
 }
 
 impl Inventory {
@@ -46,6 +47,7 @@ impl Inventory {
                         0,
                     ],
                     term_sent: false,
+                    denied: false,
                 });
             }
         }
@@ -71,6 +73,15 @@ impl Inventory {
                 };
                 match result {
                     Ok(()) | Err(Errno::SRCH) => {}
+                    // Real/saved UIDs no longer match ours (e.g. after sudo): not signalable, still owned.
+                    Err(Errno::PERM) => {
+                        if !std::mem::replace(&mut target.denied, true) {
+                            crate::diagnostic(format!(
+                                "Linux denied signals to privileged descendant {pid}; it remains a known survivor"
+                            ));
+                        }
+                        break;
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -156,8 +167,9 @@ impl Inventory {
         };
         let mut gone = Vec::new();
         for (pid, (fd, _)) in &self.1 {
+            // Job control cannot stop a descendant the OS forbids this user to signal.
             match process::pidfd_send_signal(fd, signal) {
-                Ok(()) => {}
+                Ok(()) | Err(Errno::PERM) => {}
                 Err(Errno::SRCH) => gone.push(*pid),
                 Err(error) => return Err(error.into()),
             }
@@ -168,7 +180,7 @@ impl Inventory {
         for (pid, target) in &self.0 {
             if target.fd.is_none() {
                 match process::kill_process(*pid, signal) {
-                    Ok(()) | Err(Errno::SRCH) => {}
+                    Ok(()) | Err(Errno::SRCH) | Err(Errno::PERM) => {}
                     Err(error) => return Err(error.into()),
                 }
             }
