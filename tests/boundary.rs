@@ -43,7 +43,10 @@ exit 23"#;
         }
     }
     fn alive(pid: i32) -> bool {
-        match process::test_kill_process(Pid::from_raw(pid).unwrap()) {
+        let pid = Pid::from_raw(pid).unwrap();
+        // Orphans reach this test process when it is a container's PID 1; reap them here.
+        let _ = process::waitpid(Some(pid), process::WaitOptions::NOHANG);
+        match process::test_kill_process(pid) {
             Ok(()) | Err(Errno::PERM) => true,
             Err(Errno::SRCH) => false,
             Err(error) => panic!("existence probe for {pid} failed: {error}"),
