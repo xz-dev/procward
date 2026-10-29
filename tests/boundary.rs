@@ -24,6 +24,13 @@ mod unix {
     if [ "$(uname)" = Linux ]; then "$3" boundary "$2" nondumpable & fi
     "$3" await "$2/go"
     exit 23"#;
+    // The intermediate shell exits at once, so the subshell is orphaned to procward's reaper
+    // before it execs the setuid helper (which keeps our real UID, like ps).
+    #[cfg(not(target_os = "macos"))]
+    const ORPHAN: &str = r#"/bin/sh -c '( "$3" await "$2/exec"; exec "$1" boundary "$2" orphan ) &' sh "$1" "$2" "$3"
+: > "$2/orphaned"
+"$3" await "$2/go"
+exit 23"#;
     const DENIED: &str = "denied signals to privileged descendant";
     // Conventional unprivileged account; only used when the test itself runs as root.
     const NOBODY: u32 = 65534;
@@ -66,9 +73,9 @@ mod unix {
         unsupported: bool,
     }
     impl Boundary {
-        fn start() -> Option<Self> {
-            let dir =
-                std::env::temp_dir().join(format!("procward-boundary-{}", std::process::id()));
+        fn start(tag: &str, options: &[&str], script: &str) -> Option<Self> {
+            let dir = std::env::temp_dir()
+                .join(format!("procward-boundary-{}-{tag}", std::process::id()));
             fs::create_dir(&dir).unwrap();
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
             let helper = dir.join("setuid-fixture");
@@ -106,7 +113,9 @@ mod unix {
             };
             let mut command = Command::new(procward);
             command
-                .args(["run", "--", "/bin/sh", "-c", SCRIPT, "sh"])
+                .arg("run")
+                .args(options)
+                .args(["--", "/bin/sh", "-c", script, "sh"])
                 .arg(&helper)
                 .arg(&dir)
                 .arg(plain)
@@ -126,6 +135,48 @@ mod unix {
         }
         fn stderr(&self) -> String {
             fs::read_to_string(self.dir.join("stderr.log")).unwrap()
+        }
+        // Waits for each helper and checks its UIDs; false means qemu-user ignored setuid.
+        fn ready(&mut self, kinds: &[&'static str]) -> bool {
+            for &kind in kinds {
+                let path = self.dir.join(format!("{kind}.pid"));
+                poll(Duration::from_secs(20), "helper readiness", || {
+                    path.try_exists().unwrap()
+                });
+                let ids: Vec<u32> = fs::read_to_string(&path)
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|value| value.parse().unwrap())
+                    .collect();
+                self.pids.push((kind, ids[0] as i32));
+                let wanted = match kind {
+                    "root" => (0, 0),
+                    "nondumpable" => (self.user, self.user),
+                    _ => (self.user, 0),
+                };
+                if (ids[1], ids[2]) != wanted {
+                    if kind != "nondumpable"
+                        && std::env::var_os("PROCWARD_TEST_QEMU_USER").is_some()
+                    {
+                        self.unsupported = true;
+                        println!(
+                            "EMULATOR-UNSUPPORTED: descendant_across_access_boundary: qemu-user binfmt did not honour setuid (helper uid {}/{})",
+                            ids[1], ids[2]
+                        );
+                        return false;
+                    }
+                    panic!(
+                        "{kind} helper has real/effective UID {}/{}, expected {wanted:?}",
+                        ids[1], ids[2]
+                    );
+                }
+            }
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "procward exited while descendants crossed the boundary: {}",
+                self.stderr()
+            );
+            true
         }
     }
     impl Drop for Boundary {
@@ -166,52 +217,87 @@ mod unix {
         }
     }
 
-    #[test]
-    fn descendant_across_access_boundary_keeps_status_and_reports_denial() {
-        let Some(mut run) = Boundary::start() else {
-            return;
-        };
-        let kinds: &[&'static str] = if cfg!(target_os = "linux") {
+    fn kinds() -> &'static [&'static str] {
+        if cfg!(target_os = "linux") {
             &["keep", "root", "nondumpable"]
         } else {
             &["keep", "root"]
-        };
-        for &kind in kinds {
-            let path = run.dir.join(format!("{kind}.pid"));
-            poll(Duration::from_secs(20), "helper readiness", || {
-                path.try_exists().unwrap()
-            });
-            let ids: Vec<u32> = fs::read_to_string(&path)
-                .unwrap()
-                .split_whitespace()
-                .map(|value| value.parse().unwrap())
-                .collect();
-            run.pids.push((kind, ids[0] as i32));
-            let wanted = match kind {
-                "keep" => (run.user, 0),
-                "root" => (0, 0),
-                _ => (run.user, run.user),
-            };
-            if (ids[1], ids[2]) != wanted {
-                if kind != "nondumpable" && std::env::var_os("PROCWARD_TEST_QEMU_USER").is_some() {
-                    run.unsupported = true;
-                    println!(
-                        "EMULATOR-UNSUPPORTED: descendant_across_access_boundary: qemu-user binfmt did not honour setuid (helper uid {}/{})",
-                        ids[1], ids[2]
-                    );
-                    return;
-                }
-                panic!(
-                    "{kind} helper has real/effective UID {}/{}, expected {wanted:?}",
-                    ids[1], ids[2]
-                );
-            }
         }
-        assert!(
-            run.child.try_wait().unwrap().is_none(),
-            "procward exited while descendants crossed the boundary: {}",
+    }
+
+    #[test]
+    fn denied_survivor_past_cleanup_deadline_fails_closed() {
+        let options = [
+            "--grace",
+            "300ms",
+            "--fatal-grace",
+            "150ms",
+            "--cleanup-deadline",
+            "1500ms",
+        ];
+        let Some(mut run) = Boundary::start("deadline", &options, SCRIPT) else {
+            return;
+        };
+        if !run.ready(kinds()) {
+            return;
+        }
+        fs::write(run.dir.join("go"), b"go").unwrap();
+        poll(Duration::from_secs(8), "deadline failure", || {
+            run.child.try_wait().unwrap().is_some()
+        });
+        let stderr = run.stderr();
+        assert_eq!(run.child.wait().unwrap().code(), Some(125), "{stderr}");
+        assert!(stderr.contains(DENIED), "{stderr}");
+        assert!(stderr.contains("cleanup deadline expired"), "{stderr}");
+        eprintln!("access-boundary deadline stderr: {stderr:?}");
+        let root = run.pids[1].1;
+        assert!(alive(root), "denied survivor was not alive at the deadline");
+        for (kind, pid) in &run.pids {
+            assert!(
+                *kind == "root" || !alive(*pid),
+                "{kind} survived the deadline"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn orphan_that_execs_setuid_after_adoption_is_still_cleaned() {
+        let Some(mut run) = Boundary::start("orphan", &[], ORPHAN) else {
+            return;
+        };
+        // The foreground intermediate has exited, so the subshell is already an orphan; only
+        // now does it exec the setuid helper and change credentials under procward.
+        let orphaned = run.dir.join("orphaned");
+        poll(Duration::from_secs(20), "orphan adoption", || {
+            orphaned.try_exists().unwrap()
+        });
+        fs::write(run.dir.join("exec"), b"go").unwrap();
+        if !run.ready(&["orphan"]) {
+            return;
+        }
+        fs::write(run.dir.join("go"), b"go").unwrap();
+        poll(Duration::from_secs(8), "owner completion", || {
+            run.child.try_wait().unwrap().is_some()
+        });
+        assert_eq!(
+            run.child.wait().unwrap().code(),
+            Some(23),
+            "{}",
             run.stderr()
         );
+        let orphan = run.pids[0].1;
+        assert!(!alive(orphan), "orphan survived after its setuid exec");
+    }
+
+    #[test]
+    fn descendant_across_access_boundary_keeps_status_and_reports_denial() {
+        let Some(mut run) = Boundary::start("status", &[], SCRIPT) else {
+            return;
+        };
+        if !run.ready(kinds()) {
+            return;
+        }
         fs::write(run.dir.join("go"), b"go").unwrap();
         poll(Duration::from_secs(6), "denial report", || {
             run.stderr().contains(DENIED) || run.child.try_wait().unwrap().is_some()
