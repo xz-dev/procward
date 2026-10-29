@@ -505,6 +505,61 @@ mod tests {
         );
     }
     #[test]
+    fn known_orphan_keeps_ownership_after_setuid_exec() {
+        let _guard = crate::owner::tests::PROCESS_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("procward-darwin-orphan-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let mut holder = Command::new("/bin/sh")
+            .args(["-c", "read line", "sh", &"x".repeat(256 * 1024)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The subshell is observed with our credentials, orphaned, then execs setuid-root ps,
+        // which blocks on the unread stdout pipe.
+        let script = r#"(while [ ! -e "$1/go" ]; do sleep 0.01; done; exec /bin/ps -ww -o command= -p "$2") &
+echo $! > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid"
+while [ ! -e "$1/exit" ]; do sleep 0.01; done"#;
+        let mut intermediate = Command::new("/bin/sh")
+            .args(["-c", script, "sh"])
+            .arg(&dir)
+            .arg(holder.id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let path = dir.join("pid");
+        poll(|| path.try_exists().unwrap());
+        let pid: Pid =
+            Pid::from_raw(fs::read_to_string(&path).unwrap().trim().parse().unwrap()).unwrap();
+        let mut inventory = Inventory::new();
+        poll(|| {
+            inventory.refresh().unwrap();
+            inventory.0.contains_key(&pid)
+        });
+        let before = inventory.0[&pid].identity;
+        fs::write(dir.join("exit"), b"go").unwrap();
+        intermediate.wait().unwrap();
+        fs::write(dir.join("go"), b"go").unwrap();
+        poll(|| effective_uid(pid) == Some(0));
+        let refreshed = inventory.refresh();
+        let after = inventory.0.get(&pid).map(|target| target.identity);
+        let killed =
+            refreshed.is_ok() && after.is_some() && inventory.advance(Phase::Kill, None).is_ok();
+        if !killed {
+            let _ = process::kill_process(pid, process::Signal::KILL);
+        }
+        poll(|| matches!(current(pid), Ok(None)));
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        drop(intermediate);
+        fs::remove_dir_all(&dir).unwrap();
+        refreshed.unwrap();
+        let after = after.expect("orphan was forgotten after setuid exec");
+        assert_eq!((before.uid, after.uid), (process::getuid().as_raw(), 0));
+        assert!(killed, "known orphan was not signalled after setuid exec");
+    }
+    #[test]
     fn denied_signal_keeps_privileged_target_as_known_survivor() {
         // xnu bsd/kern/kern_sig.c cansignal_nomac(): nobody, not even root, may signal initproc.
         let launchd = Pid::from_raw(1).unwrap();
