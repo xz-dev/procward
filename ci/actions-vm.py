@@ -203,7 +203,7 @@ def main():
         # the dev build, and emulated riscv64 doubles again.
         release = request['mode'] == 'release'
         setup_budget = (7200 if release else 3600) if request['target'].startswith('riscv64') \
-            else (5400 if release else 2700)
+            else (7200 if release else 2700)
         subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.provider, setup],
                        check=True, timeout=setup_budget)
         check_identity(pidfds[0])
