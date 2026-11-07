@@ -307,6 +307,20 @@ fn repeated_stop_background_foreground_freezes_detached_work_and_reconciles_cont
     assert!(terminal.finish_host().success());
 }
 
+// Drops only procward's one visible weaker-backend startup diagnostic from a transcript.
+fn payload_output(output: &str) -> String {
+    output
+        .split_inclusive('\n')
+        .filter(|line| {
+            !(cfg!(target_os = "linux")
+                && line.starts_with("procward: Linux cgroup v2 workload group unavailable (")
+                && line
+                    .trim_end()
+                    .ends_with("); cleanup falls back to subreaper and pidfd termination"))
+        })
+        .collect()
+}
+
 #[test]
 fn interactive_stderr_keeps_its_redirected_destination() {
     let _guard = SPAWN_LOCK
@@ -319,7 +333,19 @@ fn interactive_stderr_keeps_its_redirected_destination() {
         t.dir.join("result").exists() && t.output.contains("FINAL-TAIL")
     });
     assert_eq!(terminal.file("result"), "23");
-    assert_eq!(terminal.file("stderr"), "REDIRECTED-TAIL\n");
+    // Only procward's one visible weaker-backend startup diagnostic may precede payload bytes.
+    let stderr = terminal.file("stderr");
+    let payload = match stderr.split_once('\n') {
+        Some((first, rest))
+            if cfg!(target_os = "linux")
+                && first.starts_with("procward: Linux cgroup v2 workload group unavailable (")
+                && first.ends_with("); cleanup falls back to subreaper and pidfd termination") =>
+        {
+            rest
+        }
+        _ => stderr.as_str(),
+    };
+    assert_eq!(payload, "REDIRECTED-TAIL\n");
     assert!(!terminal.output.contains("REDIRECTED-TAIL"));
     assert!(terminal.finish_host().success());
 }
@@ -341,7 +367,10 @@ fn interrupt_is_single_and_normal_final_tail_is_not_discarded() {
         t.dir.join("returned-state").exists() && t.output.contains("FINAL-TAIL")
     });
     assert_eq!(
-        terminal.output.bytes().filter(|b| *b == b'x').count(),
+        payload_output(&terminal.output)
+            .bytes()
+            .filter(|b| *b == b'x')
+            .count(),
         262144
     );
     assert_eq!(terminal.file("result"), "23");

@@ -5,6 +5,22 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Removes only Linux procward's one visible weaker-backend startup diagnostic, if present.
+fn payload_stderr(bytes: &[u8]) -> &[u8] {
+    const PREFIX: &[u8] = b"procward: Linux cgroup v2 workload group unavailable (";
+    const SUFFIX: &[u8] = b"); cleanup falls back to subreaper and pidfd termination";
+    match bytes.iter().position(|byte| *byte == b'\n') {
+        Some(end)
+            if cfg!(target_os = "linux")
+                && bytes.starts_with(PREFIX)
+                && bytes[..end].ends_with(SUFFIX) =>
+        {
+            &bytes[end + 1..]
+        }
+        _ => bytes,
+    }
+}
+
 #[test]
 fn backend_runs_real_fixture_and_preserves_primary_status() {
     let fixture = std::env::current_exe()
@@ -136,7 +152,7 @@ fn native_arguments_and_redirected_streams_survive_backend_spawn() {
     }
     expected.extend_from_slice(b"input\0bytes");
     assert_eq!(output.stdout, expected);
-    assert_eq!(output.stderr, b"fixture-stderr\n");
+    assert_eq!(payload_stderr(&output.stderr), b"fixture-stderr\n");
     fs::remove_dir_all(dir).unwrap();
 }
 

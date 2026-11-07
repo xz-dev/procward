@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 use std::{env, ffi::OsString, process::ExitCode};
+#[cfg(target_os = "linux")]
+mod cgroup;
 mod config;
 mod contract;
 #[cfg(target_os = "linux")]
@@ -54,6 +56,10 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         [role, rest @ ..] if role == "__anchor" => owner::anchor(rest)
+            .map(u32::from)
+            .map_err(|error| (125, error.to_string())),
+        #[cfg(target_os = "linux")]
+        [role, rest @ ..] if role == "__cgroup_exec" => cgroup::exec(rest)
             .map(u32::from)
             .map_err(|error| (125, error.to_string())),
         #[cfg(unix)]
@@ -118,6 +124,14 @@ pub(crate) fn diagnostic(message: String) {
     // A full inherited stderr must not retain a cleaned controller or block failover.
     if std::thread::Builder::new()
         .spawn(move || {
+            // A diagnostic to a TOSTOP terminal from a background job must not stop the job.
+            #[cfg(unix)]
+            unsafe {
+                let mut set = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTTOU);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            }
             let _ = writeln!(std::io::stderr(), "procward: {message}");
             let _ = send.send(());
         })

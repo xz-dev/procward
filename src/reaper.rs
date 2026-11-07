@@ -45,6 +45,8 @@ pub fn run_owned(
     config: Config,
 ) -> io::Result<u8> {
     acquire()?;
+    #[cfg(target_os = "linux")]
+    let scope = crate::cgroup::Scope::inherited()?;
     let mut terminal =
         if std::env::var_os("PROCWARD_PRIVATE_TASK").as_deref() == Some(OsStr::new("1")) {
             None
@@ -72,8 +74,21 @@ pub fn run_owned(
     } else {
         let mut payload = Command::new(command);
         payload.args(args);
+        #[cfg(target_os = "linux")]
+        if scope.is_some() {
+            // A trusted stage joins the group before the untrusted command can fork.
+            payload = Command::new(std::env::current_exe()?);
+            payload.arg("__cgroup_exec").arg(command).args(args);
+        }
         payload
     };
+    #[cfg(target_os = "linux")]
+    {
+        payload.env_remove(crate::cgroup::ENV);
+        if let Some(scope) = &scope {
+            scope.pass(&mut payload);
+        }
+    }
     crate::contract::clear(&mut payload);
     payload.env_remove("PROCWARD_PRIVATE_TASK");
     if let Some(handoff) = &handoff {
@@ -97,6 +112,10 @@ pub fn run_owned(
         .as_mut()
         .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = scope {
+        inventory.own(scope);
+    }
     inventory.progress().publish_to(notice)?;
     let mut result = None;
     let mut requested = None;
@@ -337,6 +356,12 @@ pub(crate) fn cleanup(
             }
             Err(Errno::INTR) => continue,
             Err(Errno::CHILD) => {
+                // No reapable child is not enough while the owned workload group is populated.
+                #[cfg(target_os = "linux")]
+                if !inventory.settled()? {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
                 #[cfg(target_os = "macos")]
                 if !inventory.is_empty() {
                     thread::sleep(Duration::from_millis(5));

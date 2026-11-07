@@ -170,9 +170,37 @@ fn main() {
         "boundary" => {
             let dir = Path::new(&args[2]);
             let kind = args[3].to_str().unwrap();
-            if kind == "root" && rustix::process::geteuid().is_root() {
+            #[cfg(target_os = "linux")]
+            let caller = unsafe { libc::getuid() };
+            if matches!(kind, "root" | "guardian") && rustix::process::geteuid().is_root() {
                 // POSIX: a privileged setuid() sets real, effective and saved UIDs.
                 assert_eq!(unsafe { libc::setuid(0) }, 0);
+            }
+            // A fully root guardian stays alive and denied while its child, dropped back
+            // to the caller's UID, is signalable but never adopted by procward.
+            #[cfg(target_os = "linux")]
+            let _ward = (kind == "guardian").then(|| {
+                use std::os::unix::process::CommandExt;
+                Command::new(env::current_exe().unwrap())
+                    .args([OsStr::new("boundary"), dir.as_os_str(), OsStr::new("ward")])
+                    .arg(caller.to_string())
+                    .uid(caller)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            });
+            #[cfg(target_os = "linux")]
+            if kind == "ward" {
+                let user = args[4].to_str().unwrap().parse().unwrap();
+                // Re-exec of the setuid helper regained root; drop real, effective and saved.
+                assert_eq!(unsafe { libc::setuid(user) }, 0);
+                signal_hook::flag::register(
+                    signal_hook::consts::SIGTERM,
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .unwrap();
             }
             #[cfg(target_os = "linux")]
             if kind == "nondumpable" {
@@ -183,7 +211,7 @@ fn main() {
             fs::write(&record, format!("{} {} {}", process::id(), ids.0, ids.1)).unwrap();
             fs::rename(record, dir.join(format!("{kind}.pid"))).unwrap();
             loop {
-                if kind == "root" && dir.join("release").exists() {
+                if matches!(kind, "root" | "guardian") && dir.join("release").exists() {
                     process::exit(0);
                 }
                 thread::sleep(Duration::from_millis(5));
@@ -370,6 +398,28 @@ fn main() {
                         .unwrap();
                     wait_for_input();
                 }
+                #[cfg(target_os = "linux")]
+                "cgroup-tree" => {
+                    // Membership is recorded before and after the first fork.
+                    record_cgroup(dir, mode);
+                    let _worker = spawn("cgroup-worker", dir);
+                    wait_for(&dir.join("cgroup-worker.cgroup"));
+                    wait_for_input();
+                    process::exit(23);
+                }
+                #[cfg(target_os = "linux")]
+                "cgroup-worker" => {
+                    rustix::process::setsid().unwrap();
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                    record_cgroup(dir, mode);
+                    loop {
+                        thread::park();
+                    }
+                }
                 "tree" => {
                     let _branch = spawn("branch", dir);
                     wait_for(&dir.join("worker.pid"));
@@ -442,6 +492,14 @@ fn record(out: &mut impl Write, value: &OsStr) {
     };
     out.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
     out.write_all(&bytes).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn record_cgroup(dir: &Path, mode: &str) {
+    let membership = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let record = dir.join(format!("{mode}.cgroup.tmp"));
+    fs::write(&record, membership).unwrap();
+    fs::rename(record, dir.join(format!("{mode}.cgroup"))).unwrap();
 }
 
 fn spawn(mode: &str, dir: &Path) -> process::Child {

@@ -31,7 +31,18 @@ mod unix {
 : > "$2/orphaned"
 "$3" await "$2/go"
 exit 23"#;
+    // The fully root guardian outlives cleanup; only its dropped child is signalable.
+    #[cfg(target_os = "linux")]
+    const GUARDED: &str = r#""$1" boundary "$2" guardian &
+    "$3" await "$2/go"
+    exit 23"#;
     const DENIED: &str = "denied signals to privileged descendant";
+    // Startup diagnostic when Linux selects the subreaper/pidfd backend instead of cgroup v2.
+    const FALLBACK: &str = "procward: Linux cgroup v2 workload group unavailable (";
+    // A real cgroup.kill is a kernel kill that credential checks cannot deny.
+    fn cgroup_backend(stderr: &str) -> bool {
+        cfg!(target_os = "linux") && !stderr.contains(FALLBACK)
+    }
     // Conventional unprivileged account; only used when the test itself runs as root.
     const NOBODY: u32 = 65534;
 
@@ -51,6 +62,20 @@ exit 23"#;
             Err(Errno::SRCH) => false,
             Err(error) => panic!("existence probe for {pid} failed: {error}"),
         }
+    }
+    // A killed child of a live non-reaping parent stays a zombie: terminated, not running.
+    fn running(pid: i32) -> bool {
+        if !alive(pid) {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+            let state = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next());
+            return state != Some("Z");
+        }
+        true
     }
     fn fixture() -> PathBuf {
         std::env::current_exe()
@@ -153,8 +178,8 @@ exit 23"#;
                     .collect();
                 self.pids.push((kind, ids[0] as i32));
                 let wanted = match kind {
-                    "root" => (0, 0),
-                    "nondumpable" => (self.user, self.user),
+                    "root" | "guardian" => (0, 0),
+                    "nondumpable" | "ward" => (self.user, self.user),
                     _ => (self.user, 0),
                 };
                 if (ids[1], ids[2]) != wanted {
@@ -198,7 +223,7 @@ exit 23"#;
             let mut rescued = Vec::new();
             for (kind, pid) in &self.pids {
                 // A released root helper exits by itself; anything else left is a survivor.
-                if *kind != "root" && alive(*pid) {
+                if !matches!(*kind, "root" | "guardian") && running(*pid) {
                     process::kill_process(Pid::from_raw(*pid).unwrap(), Signal::KILL).unwrap();
                     rescued.push(*kind);
                 }
@@ -249,12 +274,18 @@ exit 23"#;
             run.child.try_wait().unwrap().is_some()
         });
         let stderr = run.stderr();
-        assert_eq!(run.child.wait().unwrap().code(), Some(125), "{stderr}");
-        assert!(stderr.contains(DENIED), "{stderr}");
-        assert!(stderr.contains("cleanup deadline expired"), "{stderr}");
         eprintln!("access-boundary deadline stderr: {stderr:?}");
         let root = run.pids[1].1;
-        assert!(alive(root), "denied survivor was not alive at the deadline");
+        if cgroup_backend(&stderr) {
+            // TERM was still denied, but the workload group's kill covers the root helper.
+            assert_eq!(run.child.wait().unwrap().code(), Some(23), "{stderr}");
+            assert!(!alive(root), "cgroup.kill left the root helper alive");
+        } else {
+            assert_eq!(run.child.wait().unwrap().code(), Some(125), "{stderr}");
+            assert!(stderr.contains(DENIED), "{stderr}");
+            assert!(stderr.contains("cleanup deadline expired"), "{stderr}");
+            assert!(alive(root), "denied survivor was not alive at the deadline");
+        }
         for (kind, pid) in &run.pids {
             assert!(
                 *kind == "root" || !alive(*pid),
@@ -291,6 +322,65 @@ exit 23"#;
         );
         let orphan = run.pids[0].1;
         assert!(!alive(orphan), "orphan survived after its setuid exec");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn denied_live_ancestor_does_not_shield_signalable_descendant() {
+        let options = [
+            "--grace",
+            "300ms",
+            "--fatal-grace",
+            "150ms",
+            "--cleanup-deadline",
+            "1500ms",
+        ];
+        let mut unrelated = Command::new("sleep").arg("30").spawn().unwrap();
+        let Some(mut run) = Boundary::start("guarded", &options, GUARDED) else {
+            let _ = unrelated.kill();
+            let _ = unrelated.wait();
+            return;
+        };
+        if !run.ready(&["guardian", "ward"]) {
+            return;
+        }
+        let (guardian, ward) = (run.pids[0].1, run.pids[1].1);
+        let parent = fs::read_to_string(format!("/proc/{ward}/stat")).unwrap();
+        let parent = parent.rsplit_once(')').unwrap().1.split_whitespace().nth(1);
+        assert_eq!(parent, Some(guardian.to_string().as_str()));
+        let start = Instant::now();
+        fs::write(run.dir.join("go"), b"go").unwrap();
+        poll(Duration::from_secs(8), "procward completion", || {
+            run.child.try_wait().unwrap().is_some()
+        });
+        let elapsed = start.elapsed();
+        let stderr = run.stderr();
+        eprintln!("guarded descendant stderr: {stderr:?} after {elapsed:?}");
+        let code = run.child.wait().unwrap().code();
+        assert!(
+            !running(ward),
+            "signalable descendant of a live denied ancestor survived"
+        );
+        if cgroup_backend(&stderr) {
+            assert_eq!(code, Some(23), "{stderr}");
+            assert!(!alive(guardian), "cgroup.kill left the root guardian alive");
+        } else {
+            // The guardian never exited, so the descendant was killed without adoption.
+            assert!(
+                alive(guardian),
+                "denied guardian was not alive at the deadline"
+            );
+            assert_eq!(code, Some(125), "{stderr}");
+            assert!(stderr.contains(DENIED), "{stderr}");
+            assert!(stderr.contains("cleanup deadline expired"), "{stderr}");
+        }
+        assert!(elapsed < Duration::from_millis(1500 + 1000), "{elapsed:?}");
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "unrelated process was hit"
+        );
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
     }
 
     #[test]

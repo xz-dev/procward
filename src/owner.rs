@@ -173,6 +173,17 @@ pub fn run(
     if interactive {
         crate::terminal::interrupt_job_control()?;
     }
+    // The workload group exists before any payload; owner and anchor stay outside it.
+    #[cfg(target_os = "linux")]
+    let scope = match crate::cgroup::Scope::create() {
+        Ok(scope) => Some(scope),
+        Err(reason) => {
+            crate::diagnostic(format!(
+                "Linux cgroup v2 workload group unavailable ({reason}); cleanup falls back to subreaper and pidfd termination"
+            ));
+            None
+        }
+    };
     let (read, write) = pipe()?;
     let (notice, publish) = pipe()?;
     let expected = process::getpid();
@@ -206,6 +217,13 @@ pub fn run(
         "PROCWARD_PRIVATE_TASK",
         if task.is_some() { "1" } else { "0" },
     );
+    #[cfg(target_os = "linux")]
+    {
+        anchor.env_remove(crate::cgroup::ENV);
+        if let Some(scope) = &scope {
+            scope.pass(&mut anchor);
+        }
+    }
     let mut anchor = anchor.spawn()?;
     drop(read);
     drop(publish);
@@ -214,6 +232,11 @@ pub fn run(
     let mut policy = PolicyReader::new();
     let mut cancelled = false;
     let mut observed = Inventory::new();
+    // Group lifetime and completion authority survive anchor loss; drop removes it.
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = scope {
+        observed.own(scope);
+    }
     loop {
         policy.refresh(&notice, config)?;
         if let Some(task) = &mut task {

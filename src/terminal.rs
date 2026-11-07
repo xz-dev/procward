@@ -497,6 +497,9 @@ pub fn exec_ready(args: &[OsString]) -> io::Result<u8> {
         return Err(io::Error::other("terminal launch parent lost"));
     }
     drop(grant);
+    // The payload joins the owned workload group before it can run or fork.
+    #[cfg(target_os = "linux")]
+    crate::cgroup::join()?;
     reset_payload_signals()?;
     let result = exec_payload(command, rest);
     unsafe {
@@ -505,7 +508,7 @@ pub fn exec_ready(args: &[OsString]) -> io::Result<u8> {
     result
 }
 
-fn exec_payload(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
+pub(crate) fn exec_payload(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
     let cstring = |v: &OsStr| {
         CString::new(v.as_bytes()).map_err(|_| io::Error::other("NUL in command/environment"))
     };
@@ -514,6 +517,8 @@ fn exec_payload(command: &OsStr, args: &[OsString]) -> io::Result<u8> {
         .map(cstring)
         .collect::<io::Result<_>>()?;
     let env: Vec<CString> = std::env::vars_os()
+        // The private workload group handle never reaches the payload.
+        .filter(|(key, _)| key != "PROCWARD_PRIVATE_CGROUP")
         .map(|(key, value)| {
             let mut pair = key;
             pair.push("=");

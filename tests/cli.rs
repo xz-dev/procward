@@ -223,6 +223,18 @@ fn poll(mut condition: impl FnMut() -> bool) {
     }
 }
 
+// Removes only procward's one visible weaker-backend startup diagnostic, if present.
+fn payload_stderr(bytes: &[u8]) -> &[u8] {
+    const PREFIX: &[u8] = b"procward: Linux cgroup v2 workload group unavailable (";
+    const SUFFIX: &[u8] = b"); cleanup falls back to subreaper and pidfd termination";
+    match bytes.iter().position(|byte| *byte == b'\n') {
+        Some(end) if bytes.starts_with(PREFIX) && bytes[..end].ends_with(SUFFIX) => {
+            &bytes[end + 1..]
+        }
+        _ => bytes,
+    }
+}
+
 fn absent(pid: u32) -> bool {
     match fs::metadata(format!("/proc/{pid}")) {
         Ok(_) => false,
@@ -289,7 +301,7 @@ fn native_argv_cwd_environment_stdio_and_primary_status_are_preserved() {
     }
     expected.extend_from_slice(b"input\0bytes");
     assert_eq!(output.stdout, expected);
-    assert_eq!(output.stderr, b"fixture-stderr\n");
+    assert_eq!(payload_stderr(&output.stderr), b"fixture-stderr\n");
     assert!(!scratch.0.join("should-not-exist").exists());
 }
 

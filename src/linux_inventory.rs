@@ -8,9 +8,18 @@ use std::{collections::HashMap, fs, io};
 
 pub struct Inventory(
     HashMap<Pid, Target>,
-    HashMap<Pid, (OwnedFd, u64)>,
+    HashMap<Pid, Retained>,
     crate::policy::Progress,
+    Option<crate::cgroup::Scope>,
 );
+
+// A descendant reached only through validated parent/birth edges; the pidfd is its identity.
+struct Retained {
+    fd: OwnedFd,
+    birth: u64,
+    parent: Pid,
+    denied: bool,
+}
 
 struct Target {
     fd: Option<OwnedFd>,
@@ -25,7 +34,19 @@ impl Inventory {
             HashMap::new(),
             HashMap::new(),
             crate::policy::Progress::default(),
+            None,
         )
+    }
+
+    pub fn own(&mut self, scope: crate::cgroup::Scope) {
+        self.3 = Some(scope);
+    }
+
+    // An owned workload group must be empty as well as every direct child reaped.
+    pub fn settled(&self) -> io::Result<bool> {
+        self.3
+            .as_ref()
+            .map_or(Ok(true), |scope| Ok(!scope.populated()?))
     }
 
     pub fn progress(&mut self) -> &mut crate::policy::Progress {
@@ -86,6 +107,53 @@ impl Inventory {
                 }
             }
         }
+        if phase == crate::policy::Phase::Kill {
+            if let Some(scope) = &self.3 {
+                scope.kill()?;
+            }
+            self.kill_retained(protected)?;
+        }
+        Ok(())
+    }
+
+    // A live ancestor may never exit, so KILL reaches nondirect descendants without adoption.
+    fn kill_retained(&mut self, protected: Option<Pid>) -> io::Result<()> {
+        self.discover()?;
+        // Bounded walk: stale edges after PID reuse cannot form an endless chain.
+        let shielded = |mut pid: Pid, retained: &HashMap<Pid, Retained>| {
+            for _ in 0..=retained.len() {
+                if Some(pid) == protected {
+                    return true;
+                }
+                match retained.get(&pid) {
+                    Some(entry) => pid = entry.parent,
+                    None => return false,
+                }
+            }
+            protected.is_some()
+        };
+        let mut gone = Vec::new();
+        for pid in self.1.keys().copied().collect::<Vec<_>>() {
+            if shielded(pid, &self.1) {
+                continue;
+            }
+            let entry = self.1.get_mut(&pid).unwrap();
+            match process::pidfd_send_signal(&entry.fd, process::Signal::KILL) {
+                Ok(()) => {}
+                Err(Errno::SRCH) => gone.push(pid),
+                Err(Errno::PERM) => {
+                    if !std::mem::replace(&mut entry.denied, true) && !self.0.contains_key(&pid) {
+                        crate::diagnostic(format!(
+                            "Linux denied signals to privileged descendant {pid}; it remains a known survivor"
+                        ));
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for pid in gone {
+            self.1.remove(&pid);
+        }
         Ok(())
     }
 
@@ -94,6 +162,37 @@ impl Inventory {
     }
 
     pub fn freeze(&mut self, paused: bool) -> io::Result<()> {
+        self.discover()?;
+        let signal = if paused {
+            process::Signal::STOP
+        } else {
+            process::Signal::CONT
+        };
+        let mut gone = Vec::new();
+        for (pid, entry) in &self.1 {
+            // Job control cannot stop a descendant the OS forbids this user to signal.
+            match process::pidfd_send_signal(&entry.fd, signal) {
+                Ok(()) | Err(Errno::PERM) => {}
+                Err(Errno::SRCH) => gone.push(*pid),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for pid in gone {
+            self.1.remove(&pid);
+        }
+        for (pid, target) in &self.0 {
+            if target.fd.is_none() {
+                match process::kill_process(*pid, signal) {
+                    Ok(()) | Err(Errno::SRCH) | Err(Errno::PERM) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Extends retained handles from this process and still-valid retained parents only.
+    fn discover(&mut self) -> io::Result<()> {
         let root = process::getpid();
         let mut pending: Vec<_> = self.1.keys().copied().chain([root]).collect();
         let mut visited = std::collections::HashSet::new();
@@ -108,7 +207,7 @@ impl Inventory {
                 && self
                     .1
                     .get(&parent)
-                    .is_none_or(|(_, expected)| *expected != before)
+                    .is_none_or(|entry| entry.birth != before)
             {
                 continue;
             }
@@ -155,34 +254,25 @@ impl Inventory {
             if birth(parent)? != Some(before) {
                 continue;
             }
-            for (pid, fd, identity) in observed {
-                self.1.insert(pid, (fd, identity));
-                pending.push(pid);
-            }
-        }
-        let signal = if paused {
-            process::Signal::STOP
-        } else {
-            process::Signal::CONT
-        };
-        let mut gone = Vec::new();
-        for (pid, (fd, _)) in &self.1 {
-            // Job control cannot stop a descendant the OS forbids this user to signal.
-            match process::pidfd_send_signal(fd, signal) {
-                Ok(()) | Err(Errno::PERM) => {}
-                Err(Errno::SRCH) => gone.push(*pid),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        for pid in gone {
-            self.1.remove(&pid);
-        }
-        for (pid, target) in &self.0 {
-            if target.fd.is_none() {
-                match process::kill_process(*pid, signal) {
-                    Ok(()) | Err(Errno::SRCH) | Err(Errno::PERM) => {}
-                    Err(error) => return Err(error.into()),
+            for (pid, fd, birth) in observed {
+                // A retained handle keeps its identity across reparenting; never replace it.
+                if let Some(entry) = self.1.get_mut(&pid) {
+                    if entry.birth == birth {
+                        entry.parent = parent;
+                        pending.push(pid);
+                        continue;
+                    }
                 }
+                self.1.insert(
+                    pid,
+                    Retained {
+                        fd,
+                        birth,
+                        parent,
+                        denied: false,
+                    },
+                );
+                pending.push(pid);
             }
         }
         Ok(())
