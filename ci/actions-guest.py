@@ -169,9 +169,12 @@ def main():
         raise RuntimeError('provider did not apply the fixed 2CPU/2GiB budget')
     isolate_network()
     before = oom_kills()
-    # All builds (including the release measurement pass) finished inside the
-    # separately sized setup phase; the runtime deadline bounds only test
-    # execution, exactly as it does for the hazard job.
+    if mode == 'ci':
+        # Dev-profile warm rebuild plus summary artifacts; seconds on a hot cache.
+        call('python3', '.github/scripts/build-dist.py', target)
+    # All heavy builds (the release measurement pass and its dist-profile
+    # inventory compile) finished inside the separately sized setup phase; the
+    # runtime deadline bounds test execution, exactly as it does for hazard.
     executables = json.loads((MANIFEST.parent / 'executables.json').read_text())
     manifest = dict(request, executables=executables, modes=['cgroup'] if hazard else ['cgroup', 'fallback'],
                     hazard=hazard,
