@@ -214,12 +214,12 @@ impl Inventory {
                 Err(error) if scarce(&error) => continue,
                 Err(error) => return Err(error),
             };
-            let edges = match edges(parent) {
+            let observed_edges = match edges(parent) {
                 Ok(edges) => edges,
                 Err(error) if scarce(&error) => continue,
                 Err(error) => return Err(error),
             };
-            for (pid, observed) in edges {
+            for (pid, observed) in observed_edges {
                 // The protected keeper and its whole subtree are never reached.
                 if Some(pid) == protected {
                     continue;
@@ -250,13 +250,20 @@ impl Inventory {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                // Wait for THIS member's death before hunting its children: a
-                // fork relay cannot out-fork a waiter, because each baton dies
-                // before its child is looked for. A blocking waitid returns as
-                // soon as the kernel marks the SIGKILLed member dead, so the walk
-                // spends no polling CPU; the original deadline is still enforced
-                // between members, and a kernel-denied member is skipped at once.
-                if !denied {
+                // Wait for a member's death only when it has children to
+                // protect: a fork relay always carries its successor as an
+                // observed child, and only a still-live parent can hand over
+                // mid-kill. A blocking waitid returns as soon as the kernel
+                // marks the SIGKILLed member dead, so relays cannot out-fork a
+                // waiter; childless leaves skip the wait entirely, keeping the
+                // walk fast across wide spreads. The original deadline stays
+                // enforced between members, and a denied member is skipped at once.
+                let has_children = match edges(pid) {
+                    Ok(children) => !children.is_empty(),
+                    Err(error) if scarce(&error) => true,
+                    Err(error) => return Err(error),
+                };
+                if !denied && has_children {
                     match process::waitid(
                         process::WaitId::PidFd(fd.as_fd()),
                         process::WaitIdOptions::EXITED | process::WaitIdOptions::NOWAIT,
