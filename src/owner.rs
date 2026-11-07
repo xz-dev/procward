@@ -170,7 +170,8 @@ pub fn run(
         signal_hook::consts::SIGTTIN,
         signal_hook::consts::SIGTTOU,
     ])?;
-    if interactive {
+    // Linux: a TOSTOP-denied diagnostic must fail once with EINTR, not restart in a SIGTTOU loop.
+    if interactive || cfg!(target_os = "linux") {
         crate::terminal::interrupt_job_control()?;
     }
     // The workload group exists before any payload; owner and anchor stay outside it.
@@ -221,7 +222,7 @@ pub fn run(
     {
         anchor.env_remove(crate::cgroup::ENV);
         if let Some(scope) = &scope {
-            scope.pass(&mut anchor);
+            scope.pass_to_anchor(&mut anchor);
         }
     }
     let mut anchor = anchor.spawn()?;

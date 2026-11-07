@@ -63,6 +63,9 @@ pub fn run_owned(
         signal_hook::consts::SIGTSTP,
         signal_hook::consts::SIGCONT,
     ])?;
+    // A background anchor's TOSTOP-denied diagnostic fails once instead of restarting.
+    #[cfg(target_os = "linux")]
+    crate::terminal::interrupt_job_control()?;
     children()?;
     let mut handoff = if terminal.is_none() {
         Some(crate::contract::Handoff::new()?)
@@ -261,6 +264,12 @@ pub fn run_owned(
             Ok(None)
         },
     )?;
+    // Cleanup confirmed the group empty. A lost owner can no longer remove it, so this
+    // surviving anchor does; a live owner keeps removal after its own completion check.
+    #[cfg(target_os = "linux")]
+    if owner_lost || matches!(crate::owner::alive(lease), Ok(false)) {
+        inventory.arm_orphan_removal();
+    }
     if !result_sent {
         if let Some(code) = result {
             let _ = rustix::io::write(notice, &[b'X', code]);
@@ -324,7 +333,10 @@ pub(crate) fn cleanup(
     policy: Policy,
     mut before_advance: impl FnMut(&mut Inventory) -> io::Result<Option<Pid>>,
 ) -> io::Result<()> {
-    loop {
+    // Every Linux walk inside a pass also stops at this original deadline.
+    #[cfg(target_os = "linux")]
+    inventory.bound(policy);
+    'cleanup: loop {
         let phase = policy.phase(crate::policy::now());
         if phase == Phase::Expired {
             return Err(io::Error::other(
@@ -334,43 +346,52 @@ pub(crate) fn cleanup(
         inventory.refresh()?;
         let protected = before_advance(inventory)?;
         inventory.advance(phase, protected)?;
-        match process::wait(WaitOptions::NOHANG) {
-            Ok(Some((pid, status))) => {
-                if let Some(code) = status
-                    .exit_status()
-                    .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
-                {
-                    inventory.forget(pid);
-                    if Some(pid) == primary {
-                        if let Some(expected) = result.filter(|expected| *expected != code as u8) {
-                            return Err(io::Error::other(format!(
-                                "terminal keeper result mismatch: expected {expected}, got {code}, phase {phase:?}"
-                            )));
+        // Drain ready exits before another tree walk; rescanning for every zombie makes
+        // teardown quadratic and can spend the whole deadline after the work already died.
+        loop {
+            if policy.phase(crate::policy::now()) == Phase::Expired {
+                continue 'cleanup;
+            }
+            match process::wait(WaitOptions::NOHANG) {
+                Ok(Some((pid, status))) => {
+                    if let Some(code) = status
+                        .exit_status()
+                        .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
+                    {
+                        inventory.forget(pid);
+                        if Some(pid) == primary {
+                            if let Some(expected) =
+                                result.filter(|expected| *expected != code as u8)
+                            {
+                                return Err(io::Error::other(format!(
+                                    "terminal keeper result mismatch: expected {expected}, got {code}, phase {phase:?}"
+                                )));
+                            }
+                            *result = Some(code as u8);
                         }
-                        *result = Some(code as u8);
+                    } else if !status.stopped() && !status.continued() {
+                        return Err(io::Error::other("unexpected nonterminal child wait status"));
                     }
-                } else if !status.stopped() && !status.continued() {
-                    return Err(io::Error::other("unexpected nonterminal child wait status"));
-                }
-                continue;
-            }
-            Err(Errno::INTR) => continue,
-            Err(Errno::CHILD) => {
-                // No reapable child is not enough while the owned workload group is populated.
-                #[cfg(target_os = "linux")]
-                if !inventory.settled()? {
-                    thread::sleep(Duration::from_millis(5));
                     continue;
                 }
-                #[cfg(target_os = "macos")]
-                if !inventory.is_empty() {
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
+                Err(Errno::INTR) => continue,
+                Err(Errno::CHILD) => {
+                    // No reapable child is not enough while the owned workload group is populated.
+                    #[cfg(target_os = "linux")]
+                    if !inventory.settled()? {
+                        thread::sleep(Duration::from_millis(5));
+                        continue 'cleanup;
+                    }
+                    #[cfg(target_os = "macos")]
+                    if !inventory.is_empty() {
+                        thread::sleep(Duration::from_millis(5));
+                        continue 'cleanup;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Err(error) => return Err(error.into()),
+                Ok(None) => break,
             }
-            Err(error) => return Err(error.into()),
-            Ok(None) => {}
         }
         if protected.is_some() {
             thread::yield_now();

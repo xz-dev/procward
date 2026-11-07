@@ -4,13 +4,20 @@ use rustix::{
     io::Errno,
     process::{self, Pid, PidfdFlags},
 };
-use std::{collections::HashMap, fs, io};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+};
 
 pub struct Inventory(
     HashMap<Pid, Target>,
     HashMap<Pid, Retained>,
     crate::policy::Progress,
     Option<crate::cgroup::Scope>,
+    // The original cleanup policy bounds every walk; no new budget for a rolling tree.
+    Option<crate::policy::Policy>,
+    // Denied nondirect identities already reported, so repeated passes stay quiet.
+    HashSet<(Pid, u64)>,
 );
 
 // A descendant reached only through validated parent/birth edges; the pidfd is its identity.
@@ -18,7 +25,6 @@ struct Retained {
     fd: OwnedFd,
     birth: u64,
     parent: Pid,
-    denied: bool,
 }
 
 struct Target {
@@ -35,11 +41,30 @@ impl Inventory {
             HashMap::new(),
             crate::policy::Progress::default(),
             None,
+            None,
+            HashSet::new(),
         )
     }
 
     pub fn own(&mut self, scope: crate::cgroup::Scope) {
         self.3 = Some(scope);
+    }
+
+    // Only after owner loss and a settled cleanup may the anchor remove the owner's group.
+    pub fn arm_orphan_removal(&mut self) {
+        if let Some(scope) = &mut self.3 {
+            scope.arm_orphan_removal();
+        }
+    }
+
+    pub fn bound(&mut self, policy: crate::policy::Policy) {
+        self.4 = Some(policy);
+    }
+
+    fn expired(&self) -> bool {
+        self.4.is_some_and(|policy| {
+            policy.phase(crate::policy::now()) == crate::policy::Phase::Expired
+        })
     }
 
     // An owned workload group must be empty as well as every direct child reaped.
@@ -55,18 +80,28 @@ impl Inventory {
 
     pub fn refresh(&mut self) -> io::Result<()> {
         // Unreaped direct children cannot be reused; detached descendants enter here on adoption.
-        for pid in children()? {
+        // Descriptor shortage only delays observation to a later pass; cleanup keeps going.
+        let pids = match children() {
+            Ok(pids) => pids,
+            Err(error) if scarce(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for pid in pids {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.0.entry(pid) {
+                let born = match birth(pid) {
+                    Ok(born) => born.unwrap_or(0),
+                    Err(error) if scarce(&error) => continue,
+                    Err(error) => return Err(error),
+                };
                 entry.insert(Target {
-                    fd: open_identity(pid)?,
+                    // An unreaped direct child cannot be reused, so numeric signals stay safe.
+                    fd: match open_identity(pid) {
+                        Ok(fd) => fd,
+                        Err(error) if scarce(&error) => None,
+                        Err(error) => return Err(error),
+                    },
                     // The unreaped child binds this observation until forget/reap.
-                    identity: [
-                        pid.as_raw_nonzero().get() as u64,
-                        birth(pid)?.unwrap_or(0),
-                        0,
-                        0,
-                        0,
-                    ],
+                    identity: [pid.as_raw_nonzero().get() as u64, born, 0, 0, 0],
                     term_sent: false,
                     denied: false,
                 });
@@ -108,17 +143,21 @@ impl Inventory {
             }
         }
         if phase == crate::policy::Phase::Kill {
-            if let Some(scope) = &self.3 {
-                scope.kill()?;
-            }
             self.kill_retained(protected)?;
+            match &self.3 {
+                // cgroup.kill already reaches every member; no redundant pidfd traversal.
+                Some(scope) => scope.kill()?,
+                None => self.kill_walk(protected)?,
+            }
         }
         Ok(())
     }
 
-    // A live ancestor may never exit, so KILL reaches nondirect descendants without adoption.
+    // Handles retained by job-control freezing are signalled once at KILL, then released.
     fn kill_retained(&mut self, protected: Option<Pid>) -> io::Result<()> {
-        self.discover()?;
+        if self.1.is_empty() {
+            return Ok(());
+        }
         // Bounded walk: stale edges after PID reuse cannot form an endless chain.
         let shielded = |mut pid: Pid, retained: &HashMap<Pid, Retained>| {
             for _ in 0..=retained.len() {
@@ -132,29 +171,95 @@ impl Inventory {
             }
             protected.is_some()
         };
-        let mut gone = Vec::new();
-        for pid in self.1.keys().copied().collect::<Vec<_>>() {
-            if shielded(pid, &self.1) {
+        let mut denied = Vec::new();
+        for (pid, entry) in &self.1 {
+            if shielded(*pid, &self.1) {
                 continue;
             }
-            let entry = self.1.get_mut(&pid).unwrap();
             match process::pidfd_send_signal(&entry.fd, process::Signal::KILL) {
-                Ok(()) => {}
-                Err(Errno::SRCH) => gone.push(pid),
-                Err(Errno::PERM) => {
-                    if !std::mem::replace(&mut entry.denied, true) && !self.0.contains_key(&pid) {
-                        crate::diagnostic(format!(
-                            "Linux denied signals to privileged descendant {pid}; it remains a known survivor"
-                        ));
-                    }
-                }
+                Ok(()) | Err(Errno::SRCH) => {}
+                Err(Errno::PERM) if !self.0.contains_key(pid) => denied.push((*pid, entry.birth)),
+                Err(Errno::PERM) => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        for pid in gone {
-            self.1.remove(&pid);
+        for (pid, birth) in denied {
+            self.report_denied(pid, birth);
+        }
+        // The streaming walk re-identifies survivors; retained descriptors must not accumulate.
+        self.1.clear();
+        Ok(())
+    }
+
+    // A live ancestor may never exit, so KILL reaches nondirect descendants without adoption.
+    // Streaming: one pidfd is open at a time and closed after its KILL, so descriptor use is
+    // constant however large the tree is. Only validated parent/birth edges are followed and
+    // only pidfds are signalled, never bare nondirect PIDs. The original deadline ends a pass.
+    fn kill_walk(&mut self, protected: Option<Pid>) -> io::Result<()> {
+        let root = process::getpid();
+        let mut pending = vec![(root, None)];
+        let mut visited = HashSet::new();
+        while let Some((parent, expected)) = pending.pop() {
+            if self.expired() {
+                return Ok(());
+            }
+            if !visited.insert(parent) {
+                continue;
+            }
+            let before = match birth(parent) {
+                Ok(Some(before)) if expected.is_none_or(|birth| birth == before) => before,
+                Ok(_) => continue,
+                // Descriptor shortage leaves this pass incomplete; the next pass retries.
+                Err(error) if scarce(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            let edges = match edges(parent) {
+                Ok(edges) => edges,
+                Err(error) if scarce(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            for (pid, observed) in edges {
+                // The protected keeper and its whole subtree are never reached.
+                if Some(pid) == protected {
+                    continue;
+                }
+                if self.expired() {
+                    return Ok(());
+                }
+                let fd = match open_identity(pid) {
+                    Ok(Some(fd)) => fd,
+                    Ok(None) => continue,
+                    Err(error) if scarce(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                // The handle and the edge must name the observed child of the still-same parent.
+                match (birth(pid), birth(parent)) {
+                    (Ok(Some(child)), Ok(Some(now))) if child == observed && now == before => {}
+                    (Err(error), _) | (_, Err(error)) if !scarce(&error) => return Err(error),
+                    _ => continue,
+                }
+                match process::pidfd_send_signal(&fd, process::Signal::KILL) {
+                    Ok(()) | Err(Errno::SRCH) => {}
+                    Err(Errno::PERM) => {
+                        if !self.0.contains_key(&pid) {
+                            self.report_denied(pid, observed);
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                drop(fd);
+                pending.push((pid, Some(observed)));
+            }
         }
         Ok(())
+    }
+
+    fn report_denied(&mut self, pid: Pid, birth: u64) {
+        if self.5.insert((pid, birth)) {
+            crate::diagnostic(format!(
+                "Linux denied signals to privileged descendant {pid}; it remains a known survivor"
+            ));
+        }
     }
 
     pub fn empty_except(&self, pid: Pid) -> io::Result<bool> {
@@ -192,16 +297,23 @@ impl Inventory {
     }
 
     // Extends retained handles from this process and still-valid retained parents only.
+    // Descriptor shortage leaves freezing incomplete for this pass instead of aborting.
     fn discover(&mut self) -> io::Result<()> {
         let root = process::getpid();
         let mut pending: Vec<_> = self.1.keys().copied().chain([root]).collect();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = HashSet::new();
         while let Some(parent) = pending.pop() {
+            if self.expired() {
+                return Ok(());
+            }
             if !visited.insert(parent) {
                 continue;
             }
-            let Some(before) = birth(parent)? else {
-                continue;
+            let before = match birth(parent) {
+                Ok(Some(before)) => before,
+                Ok(None) => continue,
+                Err(error) if scarce(&error) => continue,
+                Err(error) => return Err(error),
             };
             if parent != root
                 && self
@@ -211,65 +323,39 @@ impl Inventory {
             {
                 continue;
             }
-            let tasks = match fs::read_dir(format!("/proc/{parent}/task")) {
-                Ok(tasks) => tasks,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            // Observed edges hold no descriptors; each handle is opened only when retained.
+            let observed = match edges(parent) {
+                Ok(observed) => observed,
+                Err(error) if scarce(&error) => continue,
                 Err(error) => return Err(error),
             };
-            let mut observed = Vec::new();
-            for task in tasks {
-                let text = match fs::read_to_string(task?.path().join("children")) {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error),
-                };
-                for raw in text.split_whitespace() {
-                    let pid = raw
-                        .parse()
-                        .ok()
-                        .and_then(Pid::from_raw)
-                        .ok_or_else(|| io::Error::other("invalid descendant PID"))?;
-                    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
-                        Ok(text) => text,
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                        Err(error) => return Err(error),
-                    };
-                    let actual_parent = stat
-                        .rsplit_once(')')
-                        .and_then(|(_, fields)| fields.split_whitespace().nth(1))
-                        .and_then(|v| v.parse::<i32>().ok())
-                        .and_then(Pid::from_raw);
-                    if actual_parent != Some(parent) {
-                        continue;
-                    }
-                    let observed_birth = parse_birth(&stat)?;
-                    if let Some(fd) = open_identity(pid)? {
-                        if birth(pid)? == Some(observed_birth) {
-                            observed.push((pid, fd, observed_birth));
-                        }
-                    }
-                }
-            }
-            // A stable handle plus live birth checks bind each edge to the observed parent.
-            if birth(parent)? != Some(before) {
-                continue;
-            }
-            for (pid, fd, birth) in observed {
+            for (pid, birth_seen) in observed {
                 // A retained handle keeps its identity across reparenting; never replace it.
                 if let Some(entry) = self.1.get_mut(&pid) {
-                    if entry.birth == birth {
+                    if entry.birth == birth_seen {
                         entry.parent = parent;
                         pending.push(pid);
                         continue;
                     }
                 }
+                let fd = match open_identity(pid) {
+                    Ok(Some(fd)) => fd,
+                    Ok(None) => continue,
+                    Err(error) if scarce(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                // A stable handle plus live birth checks bind each edge to the observed parent.
+                match (birth(pid), birth(parent)) {
+                    (Ok(Some(child)), Ok(Some(now))) if child == birth_seen && now == before => {}
+                    (Err(error), _) | (_, Err(error)) if !scarce(&error) => return Err(error),
+                    _ => continue,
+                }
                 self.1.insert(
                     pid,
                     Retained {
                         fd,
-                        birth,
+                        birth: birth_seen,
                         parent,
-                        denied: false,
                     },
                 );
                 pending.push(pid);
@@ -294,6 +380,49 @@ pub fn children() -> io::Result<Vec<Pid>> {
                 .ok_or_else(|| io::Error::other("invalid child PID from procfs"))
         })
         .collect()
+}
+
+// EMFILE/ENFILE are a transient observation gap, never a reason to stop cleanup early.
+fn scarce(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+}
+
+// Children of `parent` whose own stat still names it, with their birth; no handles are held.
+fn edges(parent: Pid) -> io::Result<Vec<(Pid, u64)>> {
+    let tasks = match fs::read_dir(format!("/proc/{parent}/task")) {
+        Ok(tasks) => tasks,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut observed = Vec::new();
+    for task in tasks {
+        let text = match fs::read_to_string(task?.path().join("children")) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for raw in text.split_whitespace() {
+            let pid = raw
+                .parse()
+                .ok()
+                .and_then(Pid::from_raw)
+                .ok_or_else(|| io::Error::other("invalid descendant PID"))?;
+            let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(text) => text,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let actual_parent = stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<i32>().ok())
+                .and_then(Pid::from_raw);
+            if actual_parent == Some(parent) {
+                observed.push((pid, parse_birth(&stat)?));
+            }
+        }
+    }
+    Ok(observed)
 }
 
 fn birth(pid: Pid) -> io::Result<Option<u64>> {

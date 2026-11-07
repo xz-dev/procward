@@ -119,20 +119,25 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
 }
 
 pub(crate) fn diagnostic(message: String) {
-    use std::{io::Write, sync::mpsc, time::Duration};
+    use std::{sync::mpsc, time::Duration};
     let (send, receive) = mpsc::sync_channel(1);
     // A full inherited stderr must not retain a cleaned controller or block failover.
     if std::thread::Builder::new()
+        .name("procward-diagnostic".into())
         .spawn(move || {
-            // A diagnostic to a TOSTOP terminal from a background job must not stop the job.
+            let line = format!("procward: {message}\n");
+            // One bounded attempt; the kernel, not procward, decides terminal authority.
+            // A TOSTOP background job keeps a single standard SIGTTOU stop and the line
+            // is dropped. No SIGTTOU masking, and no write_all/EINTR/EIO retry storm.
             #[cfg(unix)]
             unsafe {
-                let mut set = std::mem::zeroed();
-                libc::sigemptyset(&mut set);
-                libc::sigaddset(&mut set, libc::SIGTTOU);
-                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                libc::write(2, line.as_ptr().cast(), line.len());
             }
-            let _ = writeln!(std::io::stderr(), "procward: {message}");
+            #[cfg(not(unix))]
+            {
+                use std::io::Write;
+                let _ = std::io::stderr().write_all(line.as_bytes());
+            }
             let _ = send.send(());
         })
         .is_ok()

@@ -53,6 +53,10 @@ name = "cgroup"
 path = "tests/cgroup.rs"
 
 [[test]]
+name = "hazard"
+path = "tests/hazard.rs"
+
+[[test]]
 name = "interaction"
 path = "tests/interaction.rs"
 

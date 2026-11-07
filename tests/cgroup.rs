@@ -361,3 +361,28 @@ fn nested_invocation_owns_a_group_inside_the_outer_group_and_both_are_removed() 
         "owned workload groups were not removed"
     );
 }
+
+// N1: after owner SIGKILL the surviving anchor kills the group, confirms it empty, and
+// removes it through the owner's parent handle; no empty procward-* group is left behind.
+#[test]
+fn surviving_anchor_removes_empty_group_after_owner_loss() {
+    let Some(group) = TestGroup::create("owner-loss") else {
+        return;
+    };
+    let tree = Scratch::new("owner-loss");
+    let (mut child, primary, worker, anchor) = start(&group, &tree);
+    let fault = Instant::now();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    poll("surviving anchor completion", || !running(anchor));
+    assert!(fault.elapsed() < Duration::from_secs(2) + Duration::from_millis(500));
+    assert!(
+        !running(primary) && !running(worker),
+        "owned member survived owner loss"
+    );
+    assert!(
+        group.children().is_empty(),
+        "surviving anchor left the empty workload group: {:?}",
+        group.children()
+    );
+}

@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+mod hazard;
 mod managed;
 mod pipes;
 #[cfg(unix)]
@@ -59,6 +61,13 @@ fn main() {
         "terminal-child" => terminal::child(Path::new(&args[2])),
         #[cfg(unix)]
         "terminal-worker" => terminal::worker(Path::new(&args[2])),
+        // Refuses unless contained; launched only by the disposable VM runner.
+        #[cfg(target_os = "linux")]
+        "pwbomb" => hazard::pwbomb(args.get(2).map(|cap| cap.as_os_str())),
+        #[cfg(target_os = "linux")]
+        "tostop-host" => terminal::tostop_host(&args[2], &args[3], Path::new(&args[4]), &args[5]),
+        #[cfg(target_os = "linux")]
+        "ttou-witness" => terminal::ttou_witness(Path::new(&args[2])),
         #[cfg(windows)]
         "conpty-bootstrap" => windows::conpty_bootstrap(&args[2]),
         #[cfg(windows)]
@@ -416,6 +425,35 @@ fn main() {
                     )
                     .unwrap();
                     record_cgroup(dir, mode);
+                    loop {
+                        thread::park();
+                    }
+                }
+                // A live TERM-ignoring root holding a small TERM-ignoring subtree: while the
+                // root lives, only a recursive KILL reaches these nondirect descendants.
+                #[cfg(target_os = "linux")]
+                "fd-tree" => {
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                    let count: usize = args[3].to_str().unwrap().parse().unwrap();
+                    let leaves: Vec<_> = (0..count).map(|_| spawn("fd-leaf", dir)).collect();
+                    let pids: Vec<_> = leaves.iter().map(|leaf| leaf.id().to_string()).collect();
+                    fs::write(dir.join("fd-leaves.tmp"), pids.join(" ")).unwrap();
+                    fs::rename(dir.join("fd-leaves.tmp"), dir.join("fd-leaves")).unwrap();
+                    loop {
+                        thread::park();
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                "fd-leaf" => {
+                    signal_hook::flag::register(
+                        signal_hook::consts::SIGTERM,
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .unwrap();
                     loop {
                         thread::park();
                     }

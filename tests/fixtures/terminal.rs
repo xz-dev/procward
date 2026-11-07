@@ -66,7 +66,11 @@ pub fn host(fd: &std::ffi::OsStr, binary: &std::ffi::OsStr, dir: &Path) {
     }
     let startup = Instant::now() + Duration::from_secs(20);
     loop {
-        let children = owner_children(pid);
+        // Linux: a transient cgroup membership probe child may precede the real anchor.
+        let children: Vec<_> = owner_children(pid)
+            .into_iter()
+            .filter(|child| is_anchor(*child))
+            .collect();
         if let [anchor] = children.as_slice() {
             publish(dir.join("anchor"), anchor.to_string()).unwrap();
             break;
@@ -313,6 +317,142 @@ pub fn worker(dir: &Path) {
     }
 }
 
+// Shell-like session leader: procward runs as a background job of a TOSTOP terminal.
+#[cfg(target_os = "linux")]
+pub fn tostop_host(
+    fd: &std::ffi::OsStr,
+    binary: &std::ffi::OsStr,
+    dir: &Path,
+    mode: &std::ffi::OsStr,
+) {
+    // A fresh test-owned group whose cgroup.max.descendants is 0 forces the weaker backend.
+    if let Some(group) = env::var_os("PROCWARD_TEST_FALLBACK_GROUP") {
+        fs::write(
+            Path::new(&group).join("cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+    }
+    let fd = fd.to_str().unwrap().parse::<i32>().unwrap();
+    rustix_openpty::login_tty(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
+    let tty = unsafe { BorrowedFd::borrow_raw(0) };
+    let mut state = termios::tcgetattr(tty).unwrap();
+    state.local_modes |= termios::LocalModes::TOSTOP;
+    termios::tcsetattr(tty, termios::OptionalActions::Now, &state).unwrap();
+    let quiet = || std::process::Stdio::null();
+    // The witness leads the background job group and counts every SIGTTOU sent to the job.
+    let mut witness = Command::new(env::current_exe().unwrap())
+        .arg("ttou-witness")
+        .arg(dir)
+        .process_group(0)
+        .stdin(quiet())
+        .stdout(quiet())
+        .stderr(quiet())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !dir.join("witness-ready").exists() {
+        assert!(Instant::now() < deadline, "witness startup deadline");
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut owner = Command::new(binary);
+    owner
+        .args([
+            "run",
+            "--grace",
+            "300ms",
+            "--fatal-grace",
+            "150ms",
+            "--cleanup-deadline",
+            "1500ms",
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 0.3; exit 7",
+        ])
+        .process_group(witness.id() as i32);
+    if mode != "interactive" {
+        owner.stdin(quiet()).stdout(quiet());
+    }
+    if dir.join("redirect").exists() {
+        owner.stderr(fs::File::create(dir.join("stderr")).unwrap());
+    }
+    unsafe {
+        owner.pre_exec(|| {
+            for signal in [libc::SIGTTIN, libc::SIGTTOU] {
+                libc::signal(signal, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    #[expect(
+        clippy::zombie_processes,
+        reason = "waitpid below consumes stopped and terminal statuses"
+    )]
+    let owner = owner.spawn().unwrap();
+    let pid = Pid::from_raw(owner.id() as i32).unwrap();
+    let mut stops = 0;
+    let code = loop {
+        assert!(Instant::now() < deadline, "background procward deadline");
+        match rp::waitpid(Some(pid), WaitOptions::NOHANG | WaitOptions::UNTRACED).unwrap() {
+            Some((_, status)) if status.stopped() => {
+                // A standard job stop is allowed; resume the job as a shell `bg` would.
+                stops += 1;
+                rp::kill_process_group(Pid::from_raw(witness.id() as i32).unwrap(), Signal::CONT)
+                    .unwrap();
+            }
+            Some((_, status)) => {
+                break status
+                    .exit_status()
+                    .or_else(|| status.terminating_signal().map(|s| 128 + s))
+                    .unwrap();
+            }
+            None => thread::sleep(Duration::from_millis(2)),
+        }
+    };
+    // CPU of procward and every role it reaped: a retry storm burns the whole run.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) },
+        0
+    );
+    let cpu = |time: libc::timeval| time.tv_sec * 1000 + time.tv_usec / 1000;
+    publish(
+        dir.join("cpu-ms"),
+        (cpu(usage.ru_utime) + cpu(usage.ru_stime)).to_string(),
+    )
+    .unwrap();
+    publish(dir.join("stops"), stops.to_string()).unwrap();
+    publish(dir.join("witness-stop"), b"stop").unwrap();
+    witness.wait().unwrap();
+    publish(dir.join("result"), code.to_string()).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+pub fn ttou_witness(dir: &Path) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGTTOU, move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    }
+    publish(dir.join("witness-ready"), b"ready").unwrap();
+    while !dir.join("witness-stop").exists() {
+        thread::sleep(Duration::from_millis(2));
+    }
+    publish(
+        dir.join("ttou-count"),
+        count.load(Ordering::SeqCst).to_string(),
+    )
+    .unwrap();
+}
+
 fn publish(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     let path = path.as_ref();
     let temporary = path.with_extension("tmp");
@@ -324,6 +464,17 @@ fn observe_settings(tty: BorrowedFd<'_>) -> termios::Termios {
     // BSD settles its transient PENDIN on a readiness query, without consuming or flushing input.
     rio::ioctl_fionread(tty).unwrap();
     termios::tcgetattr(tty).unwrap()
+}
+
+fn is_anchor(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    return fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|argv| argv.split(|byte| *byte == 0).nth(1) == Some(b"__anchor"));
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 fn owner_children(owner: Pid) -> Vec<u32> {

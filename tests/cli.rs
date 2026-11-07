@@ -945,3 +945,176 @@ fn early_anchor_loss_does_not_repeat_teardown_cont_for_adopted_identity() {
         "original cleanup deadline"
     );
 }
+
+// A fresh test-owned child of this test's own group with cgroup.max.descendants 0 forces the
+// weaker backend; None means the own group is not writable, so procward falls back anyway.
+struct FallbackGroup(PathBuf);
+impl FallbackGroup {
+    fn new(tag: &str) -> Option<Self> {
+        let membership = fs::read_to_string("/proc/self/cgroup").unwrap();
+        let own = membership
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))?;
+        let base = PathBuf::from("/sys/fs/cgroup").join(own.trim_start_matches('/'));
+        let path = base.join(format!("procward-test-{}-{tag}", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::ReadOnlyFilesystem
+                        | io::ErrorKind::NotFound
+                        | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return None;
+            }
+            Err(error) => panic!("test fallback group: {error}"),
+        }
+        let group = Self(path);
+        fs::write(group.0.join("cgroup.max.descendants"), "0").unwrap();
+        Some(group)
+    }
+}
+impl Drop for FallbackGroup {
+    fn drop(&mut self) {
+        let populated = || {
+            fs::read_to_string(self.0.join("cgroup.events"))
+                .unwrap()
+                .contains("populated 1")
+        };
+        let rescued = populated();
+        if rescued {
+            fs::write(self.0.join("cgroup.kill"), "1").unwrap();
+            poll(|| !populated());
+            eprintln!("HARNESS RESCUE: test fallback group still populated; NOT product cleanup");
+        }
+        fs::remove_dir(&self.0).unwrap();
+        assert!(
+            !rescued || thread::panicking(),
+            "test fallback group needed rescue"
+        );
+    }
+}
+
+// B2: a small subtree under a live TERM-ignoring root, with a descriptor limit below the
+// subtree size. Recursive KILL must not hold one pidfd per descendant or abort on EMFILE.
+#[test]
+fn low_descriptor_limit_still_kills_live_ancestor_subtree_within_deadline() {
+    use std::os::unix::process::CommandExt;
+    const LEAVES: usize = 48;
+    const NOFILE: u64 = 32;
+    let dir = Scratch::new();
+    let forced = FallbackGroup::new("nofile");
+    let mut run = Command::new("/bin/sh");
+    run.arg("-c")
+        .arg(r#"if [ -n "$0" ]; then echo $$ > "$0/cgroup.procs" || exit 99; fi; exec "$@""#)
+        .arg(
+            forced
+                .as_ref()
+                .map_or(OsStr::new(""), |group| group.0.as_os_str()),
+        )
+        .arg(env!("CARGO_BIN_EXE_procward"))
+        .args([
+            "run",
+            "--grace",
+            "300ms",
+            "--fatal-grace",
+            "150ms",
+            "--cleanup-deadline",
+            "2s",
+            "--",
+        ])
+        .arg(fixture())
+        .arg("fd-tree")
+        .arg(&dir.0)
+        .arg(LEAVES.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    unsafe {
+        run.pre_exec(|| {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            limit.rlim_cur = NOFILE.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = run.spawn().unwrap();
+    poll(|| dir.0.join("fd-leaves").try_exists().unwrap());
+    let leaves: Vec<u32> = fs::read_to_string(dir.0.join("fd-leaves"))
+        .unwrap()
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .collect();
+    assert_eq!(leaves.len(), LEAVES);
+    let fault = Instant::now();
+    rustix::process::kill_process(Pid::from_raw(child.id() as i32).unwrap(), Signal::TERM).unwrap();
+    poll(|| child.try_wait().unwrap().is_some());
+    let elapsed = fault.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let code = child.wait().unwrap().code();
+    let survivors: Vec<_> = leaves.iter().copied().filter(|pid| !absent(*pid)).collect();
+    if !survivors.is_empty() {
+        eprintln!(
+            "HARNESS RESCUE: {} fixture leaves survived; NOT product cleanup",
+            survivors.len()
+        );
+        for pid in &survivors {
+            let _ =
+                rustix::process::kill_process(Pid::from_raw(*pid as i32).unwrap(), Signal::KILL);
+        }
+    }
+    eprintln!(
+        "NOFILE-REGRESSION: forced_fallback={} code={code:?} elapsed={elapsed:?} survivors={}",
+        forced.is_some(),
+        survivors.len()
+    );
+    assert!(
+        !stderr.contains("Too many open files"),
+        "descriptor shortage aborted cleanup: {stderr}"
+    );
+    assert!(
+        survivors.is_empty(),
+        "signalable descendants abandoned: {survivors:?}"
+    );
+    assert_eq!(code, Some(137), "{stderr}");
+    assert!(
+        elapsed <= Duration::from_millis(2500),
+        "original cleanup deadline: {elapsed:?}"
+    );
+}
+
+// The preserved adversarial fixture must refuse to fork without proven containment.
+#[test]
+fn hazard_fixture_refuses_without_proven_containment() {
+    for group in [None, Some("/"), Some("/procward-not-my-group")] {
+        let mut probe = Command::new(fixture());
+        probe
+            .arg("pwbomb")
+            .arg("1")
+            .env_remove("PROCWARD_HAZARD_GROUP");
+        if let Some(group) = group {
+            probe.env("PROCWARD_HAZARD_GROUP", group);
+        }
+        let output = probe.stdin(Stdio::null()).output().unwrap();
+        assert_eq!(output.status.code(), Some(125), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("HAZARD-REFUSED: "),
+            "{output:?}"
+        );
+    }
+}

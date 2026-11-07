@@ -477,6 +477,177 @@ fn repeated_blocked_terminal_cleanup_survives_foreground_reclaim() {
     }
 }
 
+// A fresh test-owned child of this test's own group with cgroup.max.descendants 0 forces the
+// weaker backend; None means the own group is not writable, so procward falls back anyway.
+#[cfg(target_os = "linux")]
+struct FallbackGroup(PathBuf);
+#[cfg(target_os = "linux")]
+impl FallbackGroup {
+    fn new(tag: &str) -> Option<Self> {
+        let membership = stdfs::read_to_string("/proc/self/cgroup").unwrap();
+        let own = membership
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))?;
+        let base = PathBuf::from("/sys/fs/cgroup").join(own.trim_start_matches('/'));
+        let path = base.join(format!("procward-test-{}-{tag}", std::process::id()));
+        match stdfs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::ReadOnlyFilesystem
+                        | std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return None;
+            }
+            Err(error) => panic!("test fallback group: {error}"),
+        }
+        let group = Self(path);
+        stdfs::write(group.0.join("cgroup.max.descendants"), "0").unwrap();
+        Some(group)
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for FallbackGroup {
+    fn drop(&mut self) {
+        let events = stdfs::read_to_string(self.0.join("cgroup.events")).unwrap();
+        if events.contains("populated 1") {
+            stdfs::write(self.0.join("cgroup.kill"), "1").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while stdfs::read_to_string(self.0.join("cgroup.events"))
+                .unwrap()
+                .contains("populated 1")
+            {
+                assert!(Instant::now() < deadline, "test fallback group kill");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            eprintln!("HARNESS RESCUE: test fallback group still populated; NOT product cleanup");
+        }
+        stdfs::remove_dir(&self.0).unwrap();
+        assert!(
+            !events.contains("populated 1") || std::thread::panicking(),
+            "test fallback group needed rescue"
+        );
+    }
+}
+
+// Runs procward as a background job of a TOSTOP terminal; returns (transcript, result dir).
+#[cfg(target_os = "linux")]
+fn background_tostop(label: &str, mode: &str, redirect: bool) -> (String, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("procward-tostop-{}-{label}", std::process::id()));
+    let _ = stdfs::remove_dir_all(&dir);
+    stdfs::create_dir(&dir).unwrap();
+    if redirect {
+        stdfs::write(dir.join("redirect"), "redirect").unwrap();
+    }
+    let forced = FallbackGroup::new(label);
+    let pty = rustix_openpty::openpty(None, None).unwrap();
+    fs::fcntl_setfl(&pty.controller, OFlags::NONBLOCK).unwrap();
+    let raw = pty.user.as_raw_fd();
+    let fixture = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/fixture");
+    let mut host = Command::new(fixture);
+    host.arg("tostop-host")
+        .arg(raw.to_string())
+        .arg(env!("CARGO_BIN_EXE_procward"))
+        .arg(&dir)
+        .arg(mode)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    if let Some(group) = &forced {
+        host.env("PROCWARD_TEST_FALLBACK_GROUP", &group.0);
+    }
+    unsafe {
+        host.pre_exec(move || {
+            rio::fcntl_setfd(BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
+            Ok(())
+        });
+    }
+    let mut host = host.spawn().unwrap();
+    drop(pty.user);
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut bytes = [0; 4096];
+        match rio::read(&pty.controller, &mut bytes) {
+            Ok(0) | Err(Errno::AGAIN | Errno::IO) => {}
+            Ok(count) => output.extend_from_slice(&bytes[..count]),
+            Err(Errno::INTR) => {}
+            Err(error) => panic!("terminal read: {error}"),
+        }
+        if let Some(status) = host.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "tostop host failed: {status}: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("HARNESS RESCUE: tostop host deadline; NOT product behaviour");
+            let _ = host.kill();
+            let _ = host.wait();
+            panic!("tostop host deadline");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    while let Ok(count @ 1..) = rio::read(&pty.controller, &mut [0; 4096][..]) {
+        let _ = count;
+    }
+    drop(forced);
+    (String::from_utf8_lossy(&output).into_owned(), dir)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn background_tostop_diagnostic_is_denied_without_leak_or_signal_storm() {
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let read = |dir: &PathBuf, name: &str| stdfs::read_to_string(dir.join(name)).unwrap();
+    // Control: with stderr redirected, the same background run does attempt the diagnostic.
+    let (_, control) = background_tostop("control", "plain", true);
+    assert_eq!(read(&control, "result"), "7");
+    assert!(
+        read(&control, "stderr").contains("cgroup v2 workload group unavailable"),
+        "control run did not attempt the fallback diagnostic: {:?}",
+        read(&control, "stderr")
+    );
+    stdfs::remove_dir_all(&control).unwrap();
+    {
+        let mode = "plain";
+        let (transcript, dir) = background_tostop(mode, mode, false);
+        let (result, ttou, stops, cpu) = (
+            read(&dir, "result"),
+            read(&dir, "ttou-count"),
+            read(&dir, "stops"),
+            read(&dir, "cpu-ms"),
+        );
+        stdfs::remove_dir_all(&dir).unwrap();
+        eprintln!("TOSTOP {mode}: result {result} SIGTTOU {ttou} stops {stops} cpu {cpu}ms");
+        assert_eq!(result, "7", "{mode}: payload status");
+        assert!(
+            !transcript.contains("procward:"),
+            "{mode}: kernel-denied diagnostic reached the TOSTOP terminal: {transcript:?}"
+        );
+        let ttou: usize = ttou.parse().unwrap();
+        assert!(ttou <= 4, "{mode}: SIGTTOU storm: {ttou} signals");
+        assert!(
+            cpu.parse::<u64>().unwrap() < 250,
+            "{mode}: retry storm burned {cpu} ms CPU"
+        );
+    }
+}
+
 #[test]
 fn anchor_loss_restores_raw_terminal_only_with_foreground_authority() {
     let _guard = SPAWN_LOCK
