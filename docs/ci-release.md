@@ -10,12 +10,12 @@ backend boundaries, and [contract](contract.md) for application integration.
 
 | Target | Fixture executor |
 | --- | --- |
-| x86_64-unknown-linux-gnu | Ubuntu x64 |
-| aarch64-unknown-linux-gnu | Ubuntu arm64 |
-| x86_64-unknown-linux-musl | Native x64 Alpine container |
-| aarch64-unknown-linux-musl | Native arm64 Alpine container |
-| riscv64gc-unknown-linux-gnu | Official rustup target, Debian riscv64 under qemu-user |
-| riscv64gc-unknown-linux-musl | Official rustup target, Alpine riscv64 under qemu-user |
+| x86_64-unknown-linux-gnu | Ubuntu 24.04 x64 full-system VM |
+| aarch64-unknown-linux-gnu | Ubuntu 24.04 arm64 full-system VM |
+| x86_64-unknown-linux-musl | Alpine 3.24 x64 full-system VM, official Rust target |
+| aarch64-unknown-linux-musl | Alpine 3.24 arm64 full-system VM, official Rust target |
+| riscv64gc-unknown-linux-gnu | Ubuntu 24.04 riscv64 full-system QEMU VM, official Rust target |
+| riscv64gc-unknown-linux-musl | Alpine 3.24 riscv64 full-system QEMU VM, official Rust target |
 | x86_64-unknown-freebsd | FreeBSD 14.3 x64 VM |
 | aarch64-unknown-freebsd | FreeBSD 14.3 arm64 VM |
 | x86_64-apple-darwin | macOS x64 |
@@ -23,13 +23,15 @@ backend boundaries, and [contract](contract.md) for application integration.
 | x86_64-pc-windows-msvc | Windows x64, including console/ConPTY |
 | aarch64-pc-windows-msvc | Windows arm64, including console/ConPTY |
 
-Riscv64 is **emulated (qemu-user) — semantics of prctl/pidfd/process groups are
-passed through to the host kernel; timings are not representative**. Timing scale
-is 1×. Runtime probes label seccomp `ENOSYS` and broken missing-path std-spawn
-reporting `EMULATOR-UNSUPPORTED`, with counts/reasons in job summaries, not product
-passes. Full-system riscv64 VM coverage remains a follow-up. Other/native
-assertions and fault deadlines stay unchanged. Actions use full commit SHAs;
-container and binfmt images use digests.
+All six Linux rows run in separately booted full-system guests. RISC-V uses CPU
+emulation, **not qemu-user or host-kernel syscall forwarding**, and keeps all
+original capability assertions and deadlines. Linux jobs use both cgroup and
+forced-fallback passes, plus an additional separately bounded x64 GNU hazard job.
+[Provider revisions, image provenance, copy-only transfer, network restriction
+and outside-guest deadlines](../ci/linux-vms.md) define the implementation.
+Actual remote CI/dry-run verification is still required; historical container
+results below do not close this new gate. Non-Linux behavior and all publication
+eligibility/authorization conditions are unchanged.
 
 ## Size-first distribution builds
 
@@ -67,9 +69,11 @@ source and profile except opt-level (2026-10-28):
 
 Startup measurement: 21 warm-cache `procward --version` subprocess launches after
 3 warmups, wall-clock median, no performance gate. It measures CLI startup, not
-managed-command setup or cleanup. Linux container measurements include container
-launch overhead where a runner is used; qemu-user also includes emulation. These
-numbers cannot compare hardware/OS performance and do not relax fixture deadlines.
+managed-command setup or cleanup. Current Linux measurements execute inside the
+full-system guest, including every release opt-level candidate, before fixtures
+and packaging. Historical container/qemu-user timings below include their old
+executor overhead. Neither those numbers nor VM/CPU-emulation timings compare
+hardware/OS performance or relax fixture deadlines.
 
 Windows x64/arm64 set `+crt-static` in `.cargo/config.toml`; `dumpbin /DEPENDENTS`
 rejects dynamic MSVC/UCRT runtime imports. Windows still imports OS DLLs. Musl

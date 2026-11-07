@@ -132,9 +132,11 @@ permission starts cleanup, rather than claiming to undo an already granted exec.
 
 Early CI also corrected two tooling assumptions: `cargo test --all-targets`
 builds the example's test harness, not its runnable fixture image, so CI explicitly
-builds examples first. Alpine's native compiler reports `*-alpine-linux-musl`;
-the row maps that vendor alias to the required `*-unknown-linux-musl` label while
-printing actual rustc host and executing native musl fixtures.
+builds examples first. **Superseded executor history:** at that early checkpoint,
+Alpine's distro compiler reported `*-alpine-linux-musl`; the row mapped that vendor
+alias to the required `*-unknown-linux-musl` label while printing actual rustc
+host. The current Linux VM requirements instead require official exact-target
+native Rust HOST tools and do not permit that alias substitution.
 
 **Backend/runtime corrections:** FreeBSD reaper acquisition is process-scoped and
 returns EBUSY on a second acquisition; the test rescue reaper is acquired once,
@@ -219,6 +221,15 @@ Pi retains UI/hook policy. On Unix owner loss, responsive hooks get up to 5 seco
 
 As soon as the Linux skeleton compiles, create/use the GitHub repository, push it and enable `push` on every branch plus `pull_request`. Test each event head (not every intermediate SHA in a multi-commit push), including docs-only changes. Set matrix fail-fast false and do not cancel older event coverage. Run all currently applicable tests; unfinished required backends stay visibly red during development rather than being excluded. Fix forward. Rerunning flaky jobs is normal and requires no packet, preclassification approval or per-step review. Keep ordinary logs/attempt history and never relax test predicates to obtain green.
 
+#### Superseded executor history
+
+The following table and qemu-user paragraphs preserve the pre-VM execution design
+and explain its historical CI evidence. They are **not current execution
+instructions**: container/binfmt paths, host-kernel labels, emulator exemptions,
+row-only deadline scales and the future full-system follow-up are superseded by
+`specs/ci-release`, `specs/platform-backends` and `specs/test-harness`. Prior green
+runs do not satisfy the new full-system CI/release verification gate.
+
 | Required Rust/runtime target | Executor | Pi labels later mapped to it |
 | --- | --- | --- |
 | x86_64-unknown-linux-gnu | Linux x64 GNU | linux-x64-gnu-baseline/modern |
@@ -258,6 +269,19 @@ these limitations only in explicitly marked emulated test executors. Report
 never call them product passes, reinterpret 127 as success, change product code
 for emulation or weaken other/native assertions. Full-system riscv64
 `qemu-system` CI is a follow-up for complete coverage of these cases.
+
+#### Current full-system execution model
+
+All six Linux rows now require copy-only full-system guests: pinned Ubuntu 24.04
+VM Actions for GNU and Alpine 3.24 VM Actions for musl, with official exact-target
+native Rust HOST tools. RISC-V remains QEMU CPU emulation with a separate RISC-V
+kernel, not native hardware or host-kernel syscall forwarding. Fixed 2CPU/2GiB,
+guest cgroup/nft/PID bounds and independent host deadlines contain each run without
+scaling product fault deadlines. Both workflows require a separate bounded hazard
+VM; Linux release measurements and selected-opt-level `dist` suites remain inside
+the guest before packaging. The detailed constraints are in the current delta
+specs; actual new remote CI/dry-run results remain required, not inferred from the
+superseded executor history above.
 
 Build-only/cross-compile does not replace runtime tests. Setup budgets may account for guest startup but native fault teardown stays ≤8 seconds. Behaviour-driven interactions act → observe effect/not-ready hint → retry while not ready; silence fails by deadline and endless hints cannot extend the overall bound. Polling observations is allowed; sleeps must not sequence input. A stopped identity is alive, a zombie is unreaped, and a failed query is not absence. If a harness rescues a survivor, the test still failed.
 

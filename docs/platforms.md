@@ -82,10 +82,12 @@ membership before the first fork, nested groups, anchor-loss failover,
 unrelated-process survival and group removal. Without the variable it prints
 `CGROUP-NOT-RUN`; that is not a pass. The full-system Linux VM runner supplies
 it in the cgroup-enabled pass. Linux fixtures run only through
-`ci/vm-test.py`, with the separate `--hazard` run for the preserved uncapped
-rolling/deep/wide reproducer; see [development.md](development.md#build-and-checks).
-The old CI/release Linux runtime entrypoints are blocked until their full-system
-VM executors are configured. Local validation is not remote CI acceptance.
+`ci/vm-test.py` locally, or the copy-only full-system VM Actions in CI/release,
+with a separate `--hazard`/hazard job for the preserved uncapped rolling/deep/wide
+reproducer; see [development.md](development.md#build-and-checks).
+[VM provisioning and result gates](../ci/linux-vms.md) are implemented, but actual
+remote CI/dry-run verification remains required. Local/static validation is not
+remote CI acceptance.
 
 ## Descendants across an access boundary
 
@@ -208,40 +210,29 @@ runtime capability probe may label an affected case EMULATOR-UNSUPPORTED.
 
 ## riscv64 execution and release scope
 
-Required additional targets: `riscv64gc-unknown-linux-gnu` and
-`riscv64gc-unknown-linux-musl`. Both are **emulated (qemu-user) — semantics of
-prctl/pidfd/process groups are passed through to the host kernel; timings are not
-representative**. This is not native riscv64 kernel/hardware validation.
+Required targets remain `riscv64gc-unknown-linux-gnu` and
+`riscv64gc-unknown-linux-musl`. CI/release now boot Ubuntu 24.04 and Alpine 3.24
+RISC-V **full-system QEMU VMs** respectively, each with a separate RISC-V guest
+kernel. There is no qemu-user/binfmt/container runtime or host-kernel syscall
+forwarding. This is CPU emulation, not real RISC-V hardware performance evidence.
 
-GitHub has no native riscv64 runner. CI registers only riscv64 binfmt via a
-full-SHA-pinned `docker/setup-qemu-action` and digest-pinned binfmt image, then
-builds release-profile binaries/tests on x64 with the official rustup toolchain
-for the exact `riscv64gc-unknown-linux-gnu` / `riscv64gc-unknown-linux-musl` target,
-then executes them in digest-pinned Debian GNU/Alpine musl containers. GNU uses
-the distro cross GCC/sysroot; musl uses Rust's shipped self-contained runtime and
-linker. No Alpine compiler triple alias is substituted for the release target.
-The workspace is mounted at its original absolute path so compiled-in fixture
-paths remain valid. Source SHA, compiler host, selected target, RISC-V ELF machine
-and executor/caveat are printed. Tests are serialized to avoid emulator CPU
-contention; timing scale remains **1×**, with unchanged timing, ordering, identity,
-liveness and completion assertions. Any wider budget must be explicitly
-documented and confined to emulated rows, never native rows.
+Official rustup native host tools compile the exact target inside each guest.
+GNU selects `riscv64-linux-gnu-gcc` in the original Ubuntu 24.04 sysroot family;
+ELF inspection rejects GLIBC symbol requirements above 2.39. Musl retains Rust's
+shipped self-contained runtime/linker and static flags. ELF inspection checks RISC-V double-float ABI;
+no Alpine compiler alias is substituted. Compiling in the copied private guest
+workspace preserves every embedded fixture executable path. Source bytes,
+compiler host and native guest architecture are checked before execution.
+See [provider pins and full-system execution plan](../ci/linux-vms.md).
 
-Two runtime capabilities can be absent in qemu-user, independent of target
-architecture: seccomp installation can return `ENOSYS`, and libc's
-`CLONE_VFORK`/`posix_spawn` path can return a child exiting 127 for a known-missing
-executable rather than reporting the spawn error. Only an explicitly labelled
-qemu-user test executor plus the matching runtime probe can report
-`EMULATOR-UNSUPPORTED` for the required-wake-denial or exec-error test. Other
-errors remain failures. These are **not product passes**: each job summary counts
-and lists observed unsupported cases. Real exit status 127 is separately tested;
-it is never relabelled as a successful spawn-error result. Native/real riscv64
-runs keep all original assertions because they do not use this emulation flag.
-No product code or native behavior is changed to work around emulator limits.
-
-Follow-up: add a full-system riscv64 VM job (`qemu-system`) for complete kernel,
-seccomp and spawn-error coverage. qemu-user cannot supply evidence for its
-explicitly listed unsupported cases.
+Tests run serialized in both cgroup-available and forced-fallback modes, with
+all original timing, ordering, identity, liveness and completion assertions.
+Timing scale remains **1×**; longer whole-job limits accommodate boot/build CPU
+emulation only. The old `PROCWARD_TEST_QEMU_USER` opt-in is not set, so seccomp,
+spawn-error and setuid capability assertions are not replaced by historical
+`EMULATOR-UNSUPPORTED` outcomes. Historical qemu-user results remain historical,
+not passes for the new full-system executor. Missing provisioning/toolchain or
+unchanged fixture failures remain failures pending actual remote verification.
 
 Both riscv64 variants are required future release binary/package assets, covered
 by the same checksum, provenance and full tagged-source fixture gates as other

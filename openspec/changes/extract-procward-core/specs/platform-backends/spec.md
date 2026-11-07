@@ -5,19 +5,20 @@ Provide four-platform ownership with standard facilities, explicit startup failu
 ## ADDED Requirements
 
 ### Requirement: Complete all four platforms for v0.1.0
-Procward v0.1.0 SHALL support Linux, FreeBSD, macOS and Windows. Linux SHALL include GNU and musl on x64, arm64 and riscv64; both riscv64 targets are required release assets. GitHub CI SHALL run the riscv64 fixtures under pinned qemu-user/binfmt in digest-pinned GNU/musl riscv64 containers because no native GitHub runner is available. These rows SHALL be identified as emulated host-kernel semantic checks, not native riscv64 performance/kernel evidence. Linux-first development SHALL be an ordering choice, not a released reduction of scope. An unfinished backend SHALL appear as failed/incomplete development CI, not a false passing release result.
+Procward v0.1.0 SHALL support Linux, FreeBSD, macOS and Windows. Linux SHALL include GNU and musl on x64, arm64 and riscv64; both riscv64 targets are required release assets. Every Linux CI/release runtime row SHALL execute inside a disposable full-system guest with a kernel distinct from the actual host: Ubuntu 24.04 GNU or Alpine 3.24 musl through reviewed immutable `vmactions/ubuntu-vm` / `vmactions/alpine-vm` revisions and explicit image/builder provenance. Each guest SHALL use the official native Rust HOST toolchain for its exact target triple, never an Alpine distro alias, qemu-user/binfmt/container execution path or build-only substitute. RISC-V SHALL be identified as full-system QEMU CPU emulation with a RISC-V guest kernel, not native hardware/performance evidence or host-kernel semantic checks. Linux-first development SHALL be an ordering choice, not a released reduction of scope. An unfinished backend SHALL appear as failed/incomplete development CI, not a false passing release result.
 
-#### Scenario: riscv64 GNU and musl execute under emulation
-- **WHEN** their standalone fixtures run in CI
-- **THEN** logs/docs identify them as “emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative”
-- **AND** assertions about identity, ordering, liveness and completion remain unchanged
-- **AND** any necessary wider emulated timing budget uses a documented row-only scale factor without changing native deadlines
+Linux workflow guests SHALL use copy-only source synchronization and controlled artifact transfer without writable live host workspace shares, exactly 2 CPUs/2 GiB RAM, unified guest cgroup v2 pids/memory controllers, guest `pid_max` 4096 and nftables restrictions preserving only loopback plus required provider SSH control/transfer traffic during runtime. Actual source/kernel proof, ordinary cgroup-available and product-cgroup-denied fallback passes, and complete matching results SHALL be required under independent real-host hard deadlines. OOM, rescue, missing completion or executor death SHALL fail. Original product fault deadlines, identity/liveness/order assertions and native results SHALL remain unchanged. Linux release suites SHALL run the selected opt-level's exact `dist` binaries/fixtures before package freezing. Both CI and release workflows SHALL also require a separate x64 GNU VM that compiles inside that guest and executes only the ignored hazard case under its own 10-second host runtime deadline and finite guest workload bounds.
 
-#### Scenario: qemu-user lacks a native runtime capability
-- **WHEN** a seccomp installation probe returns ENOSYS or std spawn of a known-missing path returns a child exiting 127 in an explicitly declared emulated test executor
-- **THEN** the affected case reports `EMULATOR-UNSUPPORTED`, not a product pass, and job summaries count/list it
-- **AND** selection is runtime-probed, never based on `target_arch`, with unchanged native/other assertions and no product-code workaround
-- **AND** a full-system riscv64 VM job remains a follow-up for complete coverage
+#### Scenario: riscv64 GNU and musl execute under full-system CPU emulation
+- **WHEN** their standalone fixtures run in CI or release
+- **THEN** the exact official native HOST tools build test binaries inside matching Ubuntu 24.04 GNU or Alpine 3.24 musl RISC-V VMs, and those binaries execute only in those guests
+- **AND** logs/docs identify the separate guest kernel and full-system QEMU CPU emulation rather than claim native RISC-V hardware or host-kernel syscall forwarding
+- **AND** ordinary CI retains the release profile, release suites use `dist` after opt-level selection, and no product fault/cleanup deadline is scaled for CPU emulation
+
+#### Scenario: A required native guest capability is absent
+- **WHEN** a full-system guest cannot satisfy an applicable seccomp, spawn-error, setuid or other required fixture assertion
+- **THEN** that result fails or remains explicitly incomplete instead of borrowing a historical qemu-user exemption
+- **AND** no architecture-based skip, substituted distro compiler or product workaround converts it into release coverage
 
 #### Scenario: Early skeleton lacks a backend
 - **WHEN** the first compiling skeleton reaches the full CI matrix before all backends work

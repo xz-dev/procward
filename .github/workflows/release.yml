@@ -29,8 +29,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { runner: macos-15-intel, target: x86_64-apple-darwin }
           - { runner: macos-15, target: aarch64-apple-darwin }
           - { runner: windows-2025, target: x86_64-pc-windows-msvc }
@@ -46,14 +44,6 @@ jobs:
           rustup update stable --no-self-update
           rustc -vV
           test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
-      - name: Linux dist compile only
-        if: runner.os == 'Linux'
-        run: |
-          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
-          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
-      - name: Require isolated Linux runtime executor
-        if: runner.os == 'Linux'
-        run: python3 ci/linux-test-guard.py --check-only
       - name: Measure and build smallest distribution
         shell: bash
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure
@@ -68,6 +58,33 @@ jobs:
           path: artifacts/${{ matrix.target }}/
           if-no-files-found: error
           compression-level: 0
+  linux:
+    needs: eligibility
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 85
+        with:
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          provider: ubuntu
+          mode: release
+          deadline: 3600
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}/
+          if-no-files-found: error
+          compression-level: 0
   musl:
     needs: eligibility
     name: ${{ matrix.target }}
@@ -75,47 +92,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, key: X86_64_UNKNOWN_LINUX_MUSL }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, key: AARCH64_UNKNOWN_LINUX_MUSL }
+          - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-musl }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Read native musl image pin and prepare Python fixture runtime
-        id: images
-        run: |
-          echo "pinned base=$(sed -n 's/^FROM //p' ci/images/alpine-native/Dockerfile)"
-          docker build -t procward-musl-fixtures ci/images/alpine-native
-          echo 'runtime=procward-musl-fixtures' >> "$GITHUB_OUTPUT"
-      - name: Official exact-target static musl toolchain
-        run: |
-          git rev-parse HEAD
-          rustup update stable --no-self-update
-          rustup target add '${{ matrix.target }}'
-          rustc -vV
-          {
-            echo 'CARGO_TARGET_${{ matrix.key }}_RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes'
-            echo "CARGO_TARGET_${{ matrix.key }}_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld"
-            echo 'CARGO_TARGET_${{ matrix.key }}_RUNNER=bash .github/scripts/run-musl.sh'
-          } >> "$GITHUB_ENV"
-      - name: Static musl dist compile only
-        run: |
-          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
-          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
-      - name: Require isolated Linux runtime executor
-        run: python3 ci/linux-test-guard.py --check-only
-      - name: Measure and build smallest static distribution
-        env:
-          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
-        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-musl.sh'
-      - name: Full suite against static dist binaries in native musl container
-        env:
-          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
-        run: cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture
-      - name: Freeze release and debug packages only after fixtures pass
-        env:
-          PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
-        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package --runner 'bash .github/scripts/run-musl.sh'
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 85
+        with:
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          provider: alpine
+          mode: release
+          deadline: 3600
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.target }}
@@ -164,86 +154,48 @@ jobs:
           compression-level: 0
   riscv64:
     needs: eligibility
-    name: ${{ matrix.target }} (qemu-user)
+    name: ${{ matrix.target }} (full-system QEMU)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: riscv64gc-unknown-linux-gnu
-            libc: gnu
-            image: debian-riscv64
-          - target: riscv64gc-unknown-linux-musl
-            libc: musl
-            image: alpine-riscv64
+          - { target: riscv64gc-unknown-linux-gnu, provider: ubuntu }
+          - { target: riscv64gc-unknown-linux-musl, provider: alpine }
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    env:
-      PROCWARD_CI_TARGET: ${{ matrix.target }}
-      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
-      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: bash .github/scripts/run-riscv64.sh
-      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static -C link-self-contained=yes
-      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER: bash .github/scripts/run-riscv64.sh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Read target runtime and binfmt image pins
-        id: images
-        run: |
-          runtime=$(sed -n 's/^FROM //p' 'ci/images/${{ matrix.image }}/Dockerfile')
-          {
-            echo "runtime=$runtime"
-            echo "binfmt=$(sed -n 's/^FROM //p' ci/images/binfmt/Dockerfile)"
-          } >> "$GITHUB_OUTPUT"
-          echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
-      - name: Official cross toolchain and target runtime
-        run: |
-          git rev-parse HEAD
-          rustup update stable --no-self-update
-          rustup target add '${{ matrix.target }}'
-          rustc -vV
-          rustup target list --installed | grep -Fx '${{ matrix.target }}'
-          echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld" >> "$GITHUB_ENV"
-          if [ '${{ matrix.libc }}' = gnu ]; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
-          fi
-      - name: Riscv64 dist compile only
-        run: |
-          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
-          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
-          readelf -h 'target/${{ matrix.target }}/dist/procward' | grep 'Machine:.*RISC-V'
-      - name: Require isolated Linux runtime executor
-        run: python3 ci/linux-test-guard.py --check-only
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 115
         with:
-          platforms: riscv64
-          image: ${{ steps.images.outputs.binfmt }}
-      - name: Prepare pinned fixture runtime with Python (inside VM only)
-        run: |
-          docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
-          echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"
-      - name: Measure and build smallest emulated distribution
-        run: |
-          python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure --runner 'bash .github/scripts/run-riscv64.sh'
-          file 'target/${{ matrix.target }}/dist/procward'
-          readelf -h 'target/${{ matrix.target }}/dist/procward' | grep 'Machine:.*RISC-V'
-      - name: Full suite against emulated dist binaries
-        id: fixtures
-        run: |
-          set -o pipefail
-          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets -- --nocapture 2>&1 | tee "$RUNNER_TEMP/riscv-fixtures.log"
-      - name: Freeze release and debug packages only after fixtures pass
-        run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --package --runner 'bash .github/scripts/run-riscv64.sh'
-      - name: Count and list emulator-unsupported cases
-        if: always()
-        run: python3 .github/scripts/emulation-summary.py '${{ matrix.target }}' '${{ steps.fixtures.outcome }}' "$RUNNER_TEMP/riscv-fixtures.log"
+          target: ${{ matrix.target }}
+          arch: riscv64
+          provider: ${{ matrix.provider }}
+          mode: release
+          deadline: 5400
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packages-${{ matrix.target }}
           path: artifacts/${{ matrix.target }}/
           if-no-files-found: error
           compression-level: 0
+  linux-hazard:
+    needs: eligibility
+    name: Adversarial regression (separate 10s full-system VM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/linux-vm
+        timeout-minutes: 25
+        with:
+          target: x86_64-unknown-linux-gnu
+          arch: x86_64
+          provider: ubuntu
+          mode: hazard
+          deadline: 10
   manifest:
-    needs: [eligibility, native, musl, freebsd, riscv64]
+    needs: [eligibility, native, linux, musl, freebsd, riscv64, linux-hazard]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -46,7 +46,8 @@ Run Linux integration tests only in the disposable full-system VM:
 `python3 ci/vm-test.py --kernel <installed-kernel>` and the separate `--hazard`
 run. Host Cargo execution is guarded; containers and qemu-user alone are not
 isolation. See [development](docs/development.md#build-and-checks) for prerequisites,
-static checks, result records and the pending CI migration gate.
+static checks, result records and the remote CI verification gate. Remote Linux
+jobs use [copy-only full-system VM Actions](ci/linux-vms.md), not host containers.
 
 ## Background
 

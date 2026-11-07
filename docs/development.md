@@ -43,11 +43,12 @@ The three runner control checks are `--selftest ok`, `--selftest exit7` and
 with a hard 10-second host deadline. The ordinary suite does not silently count
 that case as executed. Run both commands for full local Linux coverage.
 
-**CI migration gate:** the existing GNU, musl and riscv64 CI/release jobs do not
-yet provision this full-system execution environment. They now refuse at an
-explicit preflight instead of running fixtures on the host or through bare
-qemu-user. Remote full-matrix VM provisioning and CI verification remain pending;
-do not merge or release on the strength of local results alone.
+**Remote verification gate:** GNU, musl and riscv64 CI/release jobs now provision
+copy-only full-system VM Actions with official exact-target Rust tools. They use
+the same guest test driver, both ordinary modes and a separately bounded hazard
+VM. [Provider pins, resources, networking and execution plan](../ci/linux-vms.md)
+describe the boundary. Actual remote full-matrix CI and dry-run release evidence
+remain pending; do not merge or release on the strength of local/static results.
 
 Build binaries and examples explicitly before focused or `--all-targets` tests:
 the example's test harness is not its executable image, and the native Darwin
@@ -58,9 +59,8 @@ tests. The lockfile includes target-specific dependency resolution.
 
 ## Dependency updates
 
-Dependabot checks Cargo, GitHub Actions and Docker image pins daily. Cargo and
-Actions allow up to 20 open version-update PRs each; Docker allows 5 per image
-directory, 20 across the four images. Its PRs run the normal full `pull_request`
+Dependabot checks Cargo and GitHub Actions daily, with up to 20 open
+version-update PRs for each ecosystem. Its PRs run the normal full `pull_request`
 CI; no auto-merge is configured. SHA-pinned `uses:` references keep their version comments (`# v4`,
 `# v7.0.2`, etc.) so Dependabot can update the SHA and version comment together.
 
@@ -71,33 +71,21 @@ vendor only after its required fixes are available and the full matrix passes.
 Refresh Cargo.lock and the dependency licence inventory/bundle with dependency
 changes. An ignored vendor is not automatically monitored by this configuration.
 
-### Automated container-image updates
+### VM executor updates
 
-Each `ci/images/*/Dockerfile` contains one `FROM tag@sha256:…` reference.
-Dependabot's Docker ecosystem scans all four directories and updates tags/digests,
-including new digests when moving tags such as Debian `unstable-slim` are rebuilt.
-These Dockerfiles are reference manifests only: CI and release workflows read
-`FROM` with `sed -n 's/^FROM //p'`, expose step outputs and pass the exact pinned
-reference to Docker runners or the setup-qemu action. Nothing is built from them.
+Linux CI/release uses pinned full-system VM Actions. The retired container image
+manifests and their Docker Dependabot entries have been removed; bare containers
+or binfmt/qemu-user do not provide the required separate-kernel runtime boundary.
 
-| Dockerfile directory | Image purpose |
-| --- | --- |
-| `ci/images/alpine-native` | Alpine, native x64/arm64 musl fixtures |
-| `ci/images/alpine-riscv64` | Alpine, riscv64 musl fixtures |
-| `ci/images/debian-riscv64` | Debian unstable-slim, riscv64 GNU fixtures |
-| `ci/images/binfmt` | tonistiigi/binfmt, qemu-user registration |
+| Linux targets | Full-system provider | Explicit release |
+| --- | --- | --- |
+| GNU x64 / arm64 / riscv64 | `vmactions/ubuntu-vm` | Ubuntu 24.04 |
+| Musl x64 / arm64 / riscv64 | `vmactions/alpine-vm` | Alpine 3.24 |
 
-Review image-update PRs with the same architecture checks and full fixture CI as
-other changes; do not replace runtime execution with a build-only check.
-
-Image contents stayed unchanged during this move. Initial `.github/ci-images`
-checks discovered the manifests but GitHub rejected PR creation with
-`dependency_file_not_supported` / `invalid or unauthorized changes` (glob run
-`40656438537`, explicit-directories run `40657102372`). The bounded fallback moved
-manifests to `ci/images` and used four singular-directory entries. All four real
-checks then succeeded: Alpine native `40658230840`, Alpine riscv64 `40658231177`,
-binfmt `40658231943`, Debian riscv64 `40658233432`. Dependabot opened Alpine PRs
-#3 and #4 with no auto-merge request. No manual image-refresh process is required.
+Review action SHA, release and builder/image provenance changes together; see
+[the provider pins and update boundary](../ci/linux-vms.md). Action dependency
+updates do not replace image/kernel review or real full-matrix fixture execution.
+Do not substitute a build-only check for runtime coverage.
 
 ## Runtime fixtures
 
@@ -303,12 +291,13 @@ No settings, tags or releases were changed during backend implementation.
 
 All pushes and pull requests now require twelve rows: GNU/musl Linux
 x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64.
-The riscv64 rows use pinned qemu-user/binfmt and digest-pinned target containers;
-see [platforms.md](platforms.md) for the host-kernel/timing limitation. No
-path/branch filters,
+The Linux rows use [copy-only full-system QEMU VMs](../ci/linux-vms.md), with
+native official Rust tools and no Alpine vendor-alias rewrite or qemu-user runner.
+RISC-V CPU emulation does not scale product deadlines. An additional independent
+x64 GNU VM runs the ignored adversarial regression. No path/branch filters,
 fail-fast or newer-event cancellation. Actual source SHA, executor, compiler host
-and fixture results appear in ordinary logs. Alpine's `*-alpine-linux-musl`
-vendor alias maps to its native `*-unknown-linux-musl` row label.
+and individual fixture results appear in ordinary logs. Historical runs below
+predate this VM migration and are not evidence that the new executors pass.
 
 Early unimplemented backends ran the fixture assertion and reported
 `BACKEND INCOMPLETE (expected-unsupported during early development, NOT release coverage)`
@@ -531,10 +520,10 @@ READY checks. Focused tests now cover both Python subprocess and `sh -c`, with a
 real inner tree/result/cleanup check and a separate exhaustive contract-isolation
 probe. Both intermediary cases passed locally. No architecture skip was added.
 
-Python is a fixture prerequisite, not a procward runtime dependency. Native musl
-CI installs it alongside its existing build tools; musl release and riscv64
-fixture runtimes build the `ci/images` Dockerfiles from their unchanged pinned
-FROM references with a Python package layer. Normal binary startup benchmarks
-therefore do not include package installation. The final follow-up matrix must
-confirm these added intermediary cases on all twelve rows; the earlier matrix
-above remains evidence for the four direct-nesting cases, not that follow-up.
+Python is a fixture prerequisite, not a procward runtime dependency. Current
+Linux VM jobs install it with their guest build tools before runtime networking
+is restricted; no package installation is included in startup measurements.
+The earlier container implementation layered Python onto pinned container bases.
+The final follow-up matrix must confirm the added intermediary cases on all
+twelve rows; the earlier matrix above remains evidence for the
+four direct-nesting cases, not that follow-up or the full-system VM migration.

@@ -10,6 +10,7 @@ import shlex
 import shutil
 import statistics
 import subprocess
+import sys
 import time
 import zipfile
 
@@ -19,6 +20,8 @@ def run(*args, **kwargs):
 
 
 def startup(binary, runner):
+    if sys.platform.startswith('linux'):
+        run(sys.executable, 'ci/linux-test-guard.py', '--check-only')
     command = shlex.split(runner) + [str(binary.resolve()), "--version"]
     samples = []
     for index in range(24):

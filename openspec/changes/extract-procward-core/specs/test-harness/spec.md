@@ -38,7 +38,7 @@ Fixtures SHALL cover startup/owner-loss races, stopped/detached descendants, liv
 - **THEN** tests observe reaping during healthy operation, not only eventual disappearance at shutdown
 
 ### Requirement: Preserve deadline assertions and report rescue honestly
-Fault tests SHALL measure at most 8 seconds from injection to platform completion with default settings, with default 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Non-default policy/failover tests SHALL enforce the original configured deadline from first cleanup start, not restart timing when a native role dies. Startup/emulation time SHALL not relax native fault deadlines. If qemu-user execution needs a wider emulated-row budget, its explicit scale factor SHALL be documented and confined to emulated rows; identity/order/liveness/completion predicates and configured-deadline-relative checks SHALL remain intact. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
+Fault tests SHALL measure at most 8 seconds from injection to platform completion with default settings, with default 6/3-second grace and 7.5-second cleanup policy checked separately where applicable. Non-default policy/failover tests SHALL enforce the original configured deadline from first cleanup start, not restart timing when a native role dies. Full-system QEMU CPU emulation MAY require larger boot/build/setup budgets but SHALL NOT scale product fault or cleanup deadlines. Harness rescue SHALL be separate from product cleanup and SHALL not turn failed assertions into success.
 
 #### Scenario: Slow runner reaches startup late
 - **WHEN** readiness consumes a larger setup budget before the fault
@@ -49,7 +49,7 @@ Fault tests SHALL measure at most 8 seconds from injection to platform completio
 - **THEN** the failed run stays failed and identifies the rescue
 
 ### Requirement: Isolate every Linux runtime test in a complete VM
-Linux integration tests SHALL execute only inside a disposable full-system VM with a kernel distinct from the host, fixed CPU/memory resources, no writable live host workspace sharing and an independent host hard deadline. The host MAY compile artifacts and perform static checks but SHALL refuse direct fixture execution, including container-only and bare qemu-user execution. A matching guest completion record and every individual result SHALL be required; missing records, VM death or external rescue SHALL NOT count as a product pass. Missing executor prerequisites SHALL fail closed, including CI/release jobs awaiting VM provisioning.
+Linux integration tests SHALL execute only inside a disposable full-system VM with a kernel distinct from the host, fixed CPU/memory resources, no writable live host workspace sharing and an independent host hard deadline. The host MAY compile artifacts and perform static checks but SHALL refuse direct fixture execution, including container-only and bare qemu-user execution. A matching guest completion record and every individual result SHALL be required; missing records, VM death or external rescue SHALL NOT count as a product pass. Missing executor prerequisites SHALL fail closed for local runs and CI/release jobs alike.
 
 #### Scenario: Developer invokes Cargo tests directly on Linux
 - **WHEN** no separate-kernel VM manifest is present
@@ -78,13 +78,13 @@ As soon as the Linux walking skeleton compiles, development SHALL publish it and
 - **THEN** the rerun is permitted without a special packet or review ritual and original logs remain attributable
 
 ### Requirement: Release only complete applicable coverage
-Before release, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. All Linux runtime rows SHALL use a complete guest kernel as their outer execution boundary. Any target-ABI qemu-user/container layer MAY run only inside that boundary and SHALL be explicitly labelled; it SHALL NOT be represented as full-system isolation or native hardware validation. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
+Before release, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. All Linux CI/release runtime rows SHALL execute in full-system VM guests using the official native Rust HOST toolchain for the exact target: Ubuntu 24.04 GNU or Alpine 3.24 musl through reviewed pinned VM Actions. RISC-V SHALL remain honestly identified as full-system QEMU CPU emulation with a separate guest kernel, not native hardware evidence. Containers, binfmt and qemu-user SHALL NOT substitute for this execution path or supply exemptions from its native guest assertions. Copy-only source synchronization, fixed 2CPU/2GiB resources, guest cgroup/nft/PID bounds, independent real-host hard deadlines and complete matching results SHALL satisfy the Linux workflow constraints in `ci-release`. Linux release suites SHALL execute the exact selected opt-level's `dist` binaries/fixtures before packaging, and both workflows SHALL additionally require the separate bounded hazard VM job. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
 
-#### Scenario: An emulated capability is absent
-- **WHEN** runtime probing in an explicitly labelled qemu-user executor finds seccomp installation ENOSYS or broken std spawn error reporting for a known-missing path
-- **THEN** that case emits `EMULATOR-UNSUPPORTED` and its reason is counted/listed in the job summary, never called a product pass
-- **AND** there is no architecture-based skip or weakened native/other assertion, and genuine primary status 127 remains tested
-- **AND** full-system riscv64 VM coverage is a documented follow-up for unsupported cases
+#### Scenario: A required full-system guest capability is absent
+- **WHEN** a current Linux guest cannot satisfy an applicable seccomp, spawn-error, setuid or other required fixture assertion
+- **THEN** the affected case fails or remains explicitly incomplete, with its reason retained rather than borrowing an old qemu-user exemption
+- **AND** there is no architecture-based skip, weakened assertion or product workaround, and genuine primary status 127 remains tested
+- **AND** historical pre-VM emulator outcomes do not provide coverage for the current full-system rows
 
 #### Scenario: Target compiles but fixtures fail
 - **WHEN** a target builds successfully without passing its applicable fixtures

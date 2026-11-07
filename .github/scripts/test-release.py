@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 def load(name):
@@ -29,6 +30,13 @@ class ReleaseTests(unittest.TestCase):
             release.eligible("pull_request", "refs/tags/v0.1.0", "0.1.0")
         # A dispatch on a real release tag still cannot sign or publish.
         self.assertFalse(release.eligible("workflow_dispatch", "refs/tags/v0.1.0", "0.1.0"))
+
+    def test_linux_measurement_refuses_before_any_product_probe(self):
+        with (patch.object(dist.sys, 'platform', 'linux'),
+              patch.object(dist, 'run', side_effect=RuntimeError('guard refused')) as command):
+            with self.assertRaisesRegex(RuntimeError, 'guard refused'):
+                dist.startup(Path('/nonexistent/product'), '')
+        command.assert_called_once_with(dist.sys.executable, 'ci/linux-test-guard.py', '--check-only')
 
     def test_packaging_requires_unchanged_measured_binary(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,3 +1,21 @@
+## Execution-model supersession: full-system Linux VMs
+
+The checked rows and run IDs below retain their original implementation/release
+history. In particular, the qemu-user/binfmt/container pipeline in 2.2 and 5.2,
+probe-only emulator exceptions in 4.8/6.5, and pre-VM CI/release evidence in 5.3
+and section 6 are **superseded executor history, not current acceptance evidence**.
+Their old imperative wording, deadline-scale allowances and full-system-as-future
+follow-up do not override the current delta requirements.
+
+Current `ci-release`, `platform-backends` and `test-harness` specs require every
+Linux workflow runtime row in a full-system Ubuntu 24.04 GNU or Alpine 3.24 musl
+guest with official exact-target native HOST tools, fixed resources, copy-only
+sync, guest cgroup/nft/PID bounds and independent host deadlines. RISC-V is
+full-system QEMU CPU emulation, not native hardware. Both workflows also require
+a distinct bounded hazard VM, and Linux release suites run the selected `dist`
+profile before packaging. New remote full-matrix CI and release dry-run evidence
+remains pending; prior checkmarks do not close that gate or authorize publication.
+
 ## 1. Build the smallest new Linux walking skeleton
 
 - [x] 1.1 Create a binary-first Rust package at version `0.1.0` with `process-wrap` 10.0.1 std frontend, narrow `rustix`/Unix `signal-hook` features and a checked lockfile/MSRV; implement `procward run -- <cmd>` using native argv, and verify `cargo check`, help/version and a fresh argv/status fixture without pi or a public library.
@@ -9,7 +27,7 @@
 
 - [x] 2.1 As soon as the Linux slice compiles, create/use the GitHub repository and set the exact description/13 topics from `design.md` with `gh repo edit`; verify metadata/canonical URL through `gh repo view`, then push the compiling project without waiting for all backends, a sealed packet or independent review. This task applies only to the later authorized implementation phase.
   Evidence: parent created/pushed repository; `gh repo view --json url,description,repositoryTopics` confirmed canonical `https://github.com/xz-dev/procward`, exact description and all 13 topics. No settings were edited by this apply slice.
-- [x] 2.2 Enable unfiltered branch `push` and `pull_request` full-suite CI across all 12 target rows: Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 via pinned VM action, macOS x64/arm64 and Windows x64/arm64. The riscv64 GNU/musl rows must cross-build official exact-target release binaries/tests, execute them in digest-pinned containers through pinned qemu-user/binfmt, disclose host-kernel semantics/nonrepresentative timings and never use build-only substitutes or weakened native/other assertions. Runtime-probed seccomp ENOSYS / missing-path std-spawn-127 cases in explicitly labelled emulated executors must report `EMULATOR-UNSUPPORTED` and be counted/listed in job summaries, not product passes. No architecture-based skips or product workaround. Pin existing container images too. Verify real fixture execution, visible incomplete/failing rows, no pi tests, no path filters and no matrix/new-event cancellation of required coverage. Binding riscv64 expansion verified by run 40557371203 (41210c0), all 12 workflow rows successful after an ordinary unchanged-source Darwin arm64 rerun; GNU lists two emulator-unsupported cases, musl one. Timing scale stays 1×. Full-system coverage remains a follow-up.
+- [x] 2.2 **Superseded executor checkpoint (historical):** Enable unfiltered branch `push` and `pull_request` full-suite CI across all 12 target rows: Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 via pinned VM action, macOS x64/arm64 and Windows x64/arm64. The riscv64 GNU/musl rows must cross-build official exact-target release binaries/tests, execute them in digest-pinned containers through pinned qemu-user/binfmt, disclose host-kernel semantics/nonrepresentative timings and never use build-only substitutes or weakened native/other assertions. Runtime-probed seccomp ENOSYS / missing-path std-spawn-127 cases in explicitly labelled emulated executors must report `EMULATOR-UNSUPPORTED` and be counted/listed in job summaries, not product passes. No architecture-based skips or product workaround. Pin existing container images too. Verify real fixture execution, visible incomplete/failing rows, no pi tests, no path filters and no matrix/new-event cancellation of required coverage. Binding riscv64 expansion verified by run 40557371203 (41210c0), all 12 workflow rows successful after an ordinary unchanged-source Darwin arm64 rerun; GNU lists two emulator-unsupported cases, musl one. Timing scale stays 1×. Full-system coverage remains a follow-up.
 - [x] 2.3 Verify normal reruns and fix-forward development work on the early matrix, including a docs-only event and an ordinary flaky-job rerun; keep previous logs, do not weaken assertions, and do not add once-only dispatches, sealed manifests, re-arm tooling or per-step review gates.
 
 ## 3. Fill lifecycle and platform gaps using crates, not copied modules
@@ -34,16 +52,16 @@
 ## 4a. Require default nesting (addendum-15)
 
 - [x] 4.7 Amend the pi contract/proposal/design/7.2: pi under pi or external procward adds its own layer; only launcher flag/environment opt-out disables it; only pi's private one-shot bootstrap marker plus valid READY skips that bootstrap's wrapping. Validate OpenSpec strictly.
-- [x] 4.8 Run `procward run -- procward run -- <fixture tree>` on all 12 rows: preserve both layers' payload result and clean descendants on primary exit; clean the whole nested tree within the outer configured deadline on outer-owner loss; clean the inner subtree and report the correct outer result on inner-owner loss; expose only inner contract metadata and no outer fd/HANDLE. Keep macOS best-effort limits and probe-only qemu-user exceptions explicit; fix product defects without weakening assertions.
+- [x] 4.8 **Historical executor checkpoint; old emulator exceptions superseded:** Run `procward run -- procward run -- <fixture tree>` on all 12 rows: preserve both layers' payload result and clean descendants on primary exit; clean the whole nested tree within the outer configured deadline on outer-owner loss; clean the inner subtree and report the correct outer result on inner-owner loss; expose only inner contract metadata and no outer fd/HANDLE. Keep macOS best-effort limits and probe-only qemu-user exceptions explicit; fix product defects without weakening assertions.
   Evidence: `ca0aaba`, CI run `40677604462` attempt 2, all 12 rows successful after an unchanged-source ordinary Darwin arm64 rerun. All four nesting cases ran in both riscv64 rows; only the existing probed seccomp/spawn cases remain emulator-unsupported. Windows x64/arm64 prove outer kill-on-close terminates inner Job work. Original pipe-leak negative control still fails; no cleanup deadline or liveness assertion was relaxed.
 - [x] 4.9 Document default nesting and backend-specific nested ownership in `docs/contract.md` and `docs/platforms.md`.
 
 ## 5. Finish documentation/release setup and get one independent review
 
 - [x] 5.1 Write README with only what procward is, installation, usage and background; verify Background links to `https://github.com/xz-dev/pi` as origin/main consumer and describes a new implementation, not copied code. Put architecture/platform internals, contract/pi integration, development/testing and dependency licence detail in the mapped `docs/` pages.
-- [x] 5.2 Complete the full applicable runtime matrix and fix forward until every v0.1.0 platform passes; verify real GNU/musl/guest/ConPTY results across all 12 rows, including explicitly labelled qemu-user riscv64 execution with a documented emulated-only timing scale only if needed, no build-only substitutes, unchanged native fault deadlines and ordinary attempt logs rather than a sealed acceptance system. Early pushes/reruns remain allowed throughout.
+- [x] 5.2 **Superseded executor checkpoint (historical):** Complete the full applicable runtime matrix and fix forward until every v0.1.0 platform passes; verify real GNU/musl/guest/ConPTY results across all 12 rows, including explicitly labelled qemu-user riscv64 execution with a documented emulated-only timing scale only if needed, no build-only substitutes, unchanged native fault deadlines and ordinary attempt logs rather than a sealed acceptance system. Early pushes/reruns remain allowed throughout.
   Evidence: `7c2180a`, CI run `40637245395`, all 12 rows successful, with unchanged fixture assertions and native fault budgets. GNU/musl riscv64 remain explicitly qemu-user with unsupported cases listed separately, not product passes.
-- Follow-up for complete riscv64 kernel/seccomp/exec-error coverage: add a full-system `qemu-system` VM CI job. qemu-user's explicitly reported unsupported cases are not coverage for those assertions.
+- **Superseded historical follow-up:** add a full-system `qemu-system` VM CI job for complete riscv64 kernel/seccomp/exec-error coverage. That execution model is now required for all Linux rows by the current specs; the old qemu-user unsupported cases remain historical non-coverage, and actual new remote verification is still pending.
 
 - [x] 5.3 Implement the version-tag-only release workflow before review: exact `vX.Y.Z`/Cargo agreement, all-12-target rebuild/full fixture rerun (including riscv64 GNU and musl), frozen download assets for both riscv64 variants as well as existing targets, `SHA256SUMS` and GitHub actions/attest provenance; verify tag/permission/failed-target/tampered-byte checks, read-only PR CI, signing-only OIDC permissions and publisher-only contents write.
   Evidence: read-only dry run `40643608524` at `12eb25b`, all 12 dist fixture/package rows plus 24-zip checksum fan-in successful; signing/publishing skipped. Stable-tag/dispatch/version, missing-target and tampered-byte regression checks passed; downloaded real candidate bytes verified, and a modified copied zip was rejected. No real tag, OIDC signature, release or setting change was exercised. Full per-target size/startup and zip-size tables are in `docs/ci-release.md`.
