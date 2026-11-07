@@ -68,11 +68,11 @@ jobs:
           - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-gnu }
           - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 160
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/linux-vm
-        timeout-minutes: 85
+        timeout-minutes: 155
         with:
           target: ${{ matrix.target }}
           arch: ${{ matrix.arch }}
@@ -95,11 +95,11 @@ jobs:
           - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-musl }
           - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-musl }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 160
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/linux-vm
-        timeout-minutes: 85
+        timeout-minutes: 155
         with:
           target: ${{ matrix.target }}
           arch: ${{ matrix.arch }}
@@ -162,11 +162,11 @@ jobs:
           - { target: riscv64gc-unknown-linux-gnu, provider: ubuntu }
           - { target: riscv64gc-unknown-linux-musl, provider: alpine }
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 185
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/linux-vm
-        timeout-minutes: 115
+        timeout-minutes: 175
         with:
           target: ${{ matrix.target }}
           arch: riscv64

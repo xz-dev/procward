@@ -198,8 +198,14 @@ def main():
         setup = (f'test "$(cat /proc/sys/kernel/random/boot_id)" != "{request["host_boot_id"]}" '
                  f'&& test "$(id -u)" = 0 && {packages} '
                  f'&& cd "$GITHUB_WORKSPACE" && python3 ci/actions-guest.py prepare {request["target"]} {request["mode"]}')
+        # Setup (packages + build + packaging) is transport, not product deadline;
+        # it is sized per target/mode: release builds with measurement run 1.5-2x
+        # the dev build, and emulated riscv64 doubles again.
+        release = request['mode'] == 'release'
+        setup_budget = (7200 if release else 3600) if request['target'].startswith('riscv64') \
+            else (5400 if release else 2700)
         subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.provider, setup],
-                       check=True, timeout=5400 if request['target'].startswith('riscv64') else 2700)
+                       check=True, timeout=setup_budget)
         check_identity(pidfds[0])
         # The deadline bounds only the runtime command itself. Transport/handshake
         # setup is not product deadline: the guest enforces the per-case budget
