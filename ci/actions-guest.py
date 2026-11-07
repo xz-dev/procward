@@ -44,8 +44,8 @@ def toolchain(target):
     key = target.upper().replace('-', '_')
     if 'musl' in target:
         os.environ[f'CARGO_TARGET_{key}_RUSTFLAGS'] = '-C target-feature=+crt-static -C link-self-contained=yes'
-        sysroot = subprocess.check_output(['rustc', '--print', 'sysroot'], text=True).strip()
-        os.environ[f'CARGO_TARGET_{key}_LINKER'] = f'{sysroot}/lib/rustlib/{target}/bin/rust-lld'
+        # The native driver supplies musl/GCC library paths for HOST build scripts.
+        os.environ[f'CARGO_TARGET_{key}_LINKER'] = 'cc'
     elif target.startswith('riscv64'):
         os.environ[f'CARGO_TARGET_{key}_LINKER'] = 'riscv64-linux-gnu-gcc'
     # No emulator/container runner: these are official native target tools/binaries.

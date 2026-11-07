@@ -21,7 +21,7 @@ CI SHALL execute applicable unit, CLI/contract, lifecycle and terminal tests on 
 #### Scenario: riscv64 has no hosted runner
 - **WHEN** every-event CI runs either riscv64 target
 - **THEN** it boots the matching Ubuntu 24.04 GNU or Alpine 3.24 musl RISC-V full-system guest, installs the official exact-target native HOST tools, and builds/runs the release-profile binaries and fixtures there
-- **AND** GNU retains the Ubuntu toolchain/libc family and `riscv64-linux-gnu-gcc`, while musl retains official `rust-lld`, static CRT and self-contained linking
+- **AND** GNU retains the Ubuntu toolchain/libc family and `riscv64-linux-gnu-gcc`, while musl retains the official Rust compiler/standard library, static CRT and self-contained linking with the matching guest's system musl `cc` linker driver supplying native GCC/musl library paths for HOST build scripts
 - **AND** source, compiler HOST, target and actual ELF ABI are verified without presenting CPU emulation as native RISC-V hardware performance
 
 #### Scenario: A required guest capability is unavailable

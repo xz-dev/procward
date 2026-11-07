@@ -24,10 +24,16 @@ old x64 cross-compilation; GNU still selects `riscv64-linux-gnu-gcc` on the
 original Ubuntu 24.04 libc/toolchain family. ELF inspection requires the RISC-V
 double-float ABI and correct GNU loader, and rejects any GLIBC symbol requirement
 newer than the original Ubuntu 24.04 sysroot's **2.39**, including frozen debug
-products. Musl retains `+crt-static`,
-`link-self-contained=yes` and official shipped `rust-lld`; distribution dependency
-inspection still rejects dynamic loaders/libraries. Missing official toolchains,
-linkers or ABI checks fail, never fall back to a distro alias or build-only row.
+products. All three musl rows retain `+crt-static` and `link-self-contained=yes`,
+but use the matching Alpine guest's system musl `cc` linker driver. Official
+rustup `rustc`/`std` remain the compiler/toolchain; this linker choice does not
+substitute an Alpine Rust compiler alias. The driver supplies native GCC/musl
+library search paths needed by HOST build scripts: direct `rust-lld` failed to
+find `-lgcc_s` and `-lc` for the RISC-V `libc` build script despite installed
+build tools. Distribution dependency inspection still rejects dynamic
+loaders/libraries, and RISC-V ELF checks still require the double-float ABI.
+Missing official toolchains, linkers or ABI checks fail, never fall back to a
+distro alias or build-only row.
 
 FreeBSD x64/arm64, macOS x64/arm64 and Windows x64/arm64 keep their existing
 executors, commands and permissions. The six Linux targets plus these six targets
@@ -50,9 +56,9 @@ The reviewed installer detects musl with `ldd --version` and maps the native
 | Target family | Compiler HOST decision | Linker/runtime ABI |
 | --- | --- | --- |
 | GNU x64 / arm64 | Official native GNU HOST in matching Ubuntu VM | Native GNU linker, glibc requirements <= 2.39 |
-| Musl x64 / arm64 | Official native musl HOST in matching Alpine VM | Official `rust-lld`, self-contained static CRT |
+| Musl x64 / arm64 | Official native musl HOST in matching Alpine VM | System musl `cc` driver, self-contained static CRT |
 | riscv64gc GNU | Official native GNU HOST in Ubuntu 24.04 RISC-V VM | `riscv64-linux-gnu-gcc`, lp64d loader/float ABI, glibc <= 2.39 |
-| riscv64gc musl | Official native musl HOST in Alpine RISC-V VM | Official `rust-lld`, self-contained static CRT, double-float ABI |
+| riscv64gc musl | Official native musl HOST in Alpine RISC-V VM | System musl `cc` driver, self-contained static CRT, double-float ABI |
 
 Thus no target currently requires a cross/prebuilt fallback, and no distro Rust
 alias is used. Workflow selection remains `stable` as before, not a new compiler

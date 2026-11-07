@@ -89,6 +89,38 @@ class Records(unittest.TestCase):
             vm.validate(self.records, self.request, 7)
 
 
+class ToolchainConfiguration(unittest.TestCase):
+    def test_all_musl_targets_use_native_cc_and_keep_static_flags(self):
+        for arch in ['x86_64', 'aarch64', 'riscv64gc']:
+            target = f'{arch}-unknown-linux-musl'
+            key = target.upper().replace('-', '_')
+            with self.subTest(target=target):
+                with (patch.dict(guest.os.environ, {'PATH': '/usr/bin', 'HOME': '/guest/root'}, clear=True),
+                      patch.object(guest.subprocess, 'check_output', return_value='/official-rust') as probe):
+                    guest.toolchain(target)
+                    self.assertEqual(guest.os.environ[f'CARGO_TARGET_{key}_LINKER'], 'cc')
+                    self.assertNotIn('rust-lld', guest.os.environ[f'CARGO_TARGET_{key}_LINKER'])
+                    self.assertEqual(guest.os.environ[f'CARGO_TARGET_{key}_RUSTFLAGS'],
+                                     '-C target-feature=+crt-static -C link-self-contained=yes')
+                    probe.assert_not_called()
+
+    def test_gnu_linker_and_flags_are_unchanged(self):
+        for arch in ['x86_64', 'aarch64', 'riscv64gc']:
+            target = f'{arch}-unknown-linux-gnu'
+            key = target.upper().replace('-', '_')
+            initial = {'PATH': '/usr/bin', 'HOME': '/guest/root',
+                       f'CARGO_TARGET_{key}_LINKER': 'existing-gnu-linker',
+                       f'CARGO_TARGET_{key}_RUSTFLAGS': 'existing-gnu-flags'}
+            with self.subTest(target=target):
+                with (patch.dict(guest.os.environ, initial, clear=True),
+                      patch.object(guest.subprocess, 'check_output') as probe):
+                    guest.toolchain(target)
+                    expected = 'riscv64-linux-gnu-gcc' if arch == 'riscv64gc' else 'existing-gnu-linker'
+                    self.assertEqual(guest.os.environ[f'CARGO_TARGET_{key}_LINKER'], expected)
+                    self.assertEqual(guest.os.environ[f'CARGO_TARGET_{key}_RUSTFLAGS'], 'existing-gnu-flags')
+                    probe.assert_not_called()
+
+
 class GuestBuildBoundary(unittest.TestCase):
     def test_hazard_and_ordinary_inventories_are_disjoint_no_run_builds(self):
         def artifact(name, kind):

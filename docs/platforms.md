@@ -218,8 +218,10 @@ forwarding. This is CPU emulation, not real RISC-V hardware performance evidence
 
 Official rustup native host tools compile the exact target inside each guest.
 GNU selects `riscv64-linux-gnu-gcc` in the original Ubuntu 24.04 sysroot family;
-ELF inspection rejects GLIBC symbol requirements above 2.39. Musl retains Rust's
-shipped self-contained runtime/linker and static flags. ELF inspection checks RISC-V double-float ABI;
+ELF inspection rejects GLIBC symbol requirements above 2.39. Musl retains official
+Rust compiler/standard-library tools, static flags and self-contained linking,
+with the matching guest's system musl `cc` linker driver supplying native
+GCC/musl library paths for build scripts. ELF inspection checks RISC-V double-float ABI;
 no Alpine compiler alias is substituted. Compiling in the copied private guest
 workspace preserves every embedded fixture executable path. Source bytes,
 compiler host and native guest architecture are checked before execution.
