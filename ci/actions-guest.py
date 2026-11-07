@@ -145,6 +145,9 @@ def main():
             raise RuntimeError(f'official target mismatch: {host} != {target}')
         env = dict(os.environ, CARGO_NET_OFFLINE='false')
         call('cargo', 'fetch', '--locked', '--target', target, env=env)
+        if mode == 'release':
+            call('python3', '.github/scripts/build-dist.py', target, '--measure')
+            os.environ['CARGO_PROFILE_DIST_OPT_LEVEL'] = (ROOT / 'artifacts' / target / 'opt-level').read_text()
         executables = inventory(target, profile, hazard)
         (MANIFEST.parent / 'executables.json').write_text(json.dumps(executables))
         return
@@ -166,16 +169,10 @@ def main():
         raise RuntimeError('provider did not apply the fixed 2CPU/2GiB budget')
     isolate_network()
     before = oom_kills()
-    if not hazard:
-        command = ['python3', '.github/scripts/build-dist.py', target]
-        if mode == 'release':
-            command.append('--measure')
-        call(*command)
-        os.environ['CARGO_PROFILE_DIST_OPT_LEVEL'] = (ROOT / 'artifacts' / target / 'opt-level').read_text()
-        executables = inventory(target, profile, False)
-    else:
-        # All setup/build work stays outside the separately bounded 10s hazard phase.
-        executables = json.loads((MANIFEST.parent / 'executables.json').read_text())
+    # All builds (including the release measurement pass) finished inside the
+    # separately sized setup phase; the runtime deadline bounds only test
+    # execution, exactly as it does for the hazard job.
+    executables = json.loads((MANIFEST.parent / 'executables.json').read_text())
     manifest = dict(request, executables=executables, modes=['cgroup'] if hazard else ['cgroup', 'fallback'],
                     hazard=hazard,
                     filters=['rolling_deep_wide_without_cgroup_survives_no_descriptor_shortcut'] if hazard else [],
