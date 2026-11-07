@@ -350,6 +350,11 @@ pub fn tostop_host(
         .stderr(quiet())
         .spawn()
         .unwrap();
+    let witness_cpu = {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+        usage
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while !dir.join("witness-ready").exists() {
         assert!(Instant::now() < deadline, "witness startup deadline");
@@ -411,17 +416,23 @@ pub fn tostop_host(
         }
     };
     // CPU of procward and every role it reaped: a retry storm burns the whole run.
+    // RUSAGE_CHILDREN also includes the still-parked witness; subtract its usage
+    // so only work spawned after it is charged to the storm budget.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     assert_eq!(
         unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) },
         0
     );
-    let cpu = |time: libc::timeval| time.tv_sec * 1000 + time.tv_usec / 1000;
-    publish(
-        dir.join("cpu-ms"),
-        (cpu(usage.ru_utime) + cpu(usage.ru_stime)).to_string(),
-    )
-    .unwrap();
+    let spent = |before: libc::timeval, after: libc::timeval| {
+        let seconds = after.tv_sec - before.tv_sec;
+        let microseconds = after.tv_usec - before.tv_usec;
+        seconds * 1000 + microseconds / 1000
+    };
+    let cpu = (spent(witness_cpu.ru_utime, usage.ru_utime)
+        + spent(witness_cpu.ru_stime, usage.ru_stime))
+    .max(0)
+    .to_string();
+    publish(dir.join("cpu-ms"), cpu.as_bytes()).unwrap();
     publish(dir.join("stops"), stops.to_string()).unwrap();
     publish(dir.join("witness-stop"), b"stop").unwrap();
     witness.wait().unwrap();

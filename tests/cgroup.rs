@@ -191,8 +191,17 @@ impl Scratch {
     }
     fn pid(&self, mode: &str) -> u32 {
         let path = self.0.join(format!("{mode}.pid"));
-        poll("fixture pid", || path.exists());
-        std::fs::read_to_string(path).unwrap().parse().unwrap()
+        // A fixture's rename may not be visible yet; an empty read is not a PID.
+        poll("non-empty fixture pid", || {
+            std::fs::read_to_string(&path)
+                .map(|text| !text.trim().is_empty())
+                .unwrap_or(false)
+        });
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
     fn membership(&self, mode: &str) -> String {
         let path = self.0.join(format!("{mode}.cgroup"));
