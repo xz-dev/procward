@@ -34,6 +34,21 @@ Linux SHALL provide child-subreaper ownership, safe stable-target signalling and
 - **WHEN** the parent disappears between arming its death wake and granting payload execution
 - **THEN** startup denies payload side effects and cleans up already created roles
 
+### Requirement: Prefer an owned Linux cgroup v2 workload group with a visible fallback
+Linux SHALL try to create a workload group only inside the owner's own current cgroup v2 group, prove `cgroup.kill` on that empty group, and join the payload before it can execute or fork, while owner, anchor and terminal keeper stay outside. KILL SHALL cover the whole group; completion SHALL need ECHILD and an unpopulated group; the creating owner SHALL keep the group across anchor loss and remove only its own empty groups. Procward SHALL NOT change host controllers, delegation, mounts, permissions or services. Without usable delegation procward SHALL print exactly one startup diagnostic and keep the subreaper backend with KILL to retained, identity-validated nondirect pidfds. Neither backend SHALL claim more than SIGKILL: a live or unknown member SHALL NOT be reported as clean, and the original deadline SHALL NOT be extended.
+
+#### Scenario: Delegated group is usable
+- **WHEN** the owner's own cgroup accepts a new child group with `cgroup.kill` and membership transfer
+- **THEN** the payload is a member before its first fork, no fallback diagnostic is printed, and cleanup kills and removes the group
+
+#### Scenario: Delegation is absent
+- **WHEN** the owner cannot create or use a group in its own cgroup
+- **THEN** startup prints the fallback diagnostic once and cleanup uses the subreaper and recursive pidfd KILL
+
+#### Scenario: Live ancestor blocks adoption in the fallback
+- **WHEN** a credential-denied ancestor stays alive above a signalable TERM-ignoring descendant
+- **THEN** the descendant is killed at the KILL phase without waiting for adoption, and the denied ancestor still yields exit 125 at the original deadline
+
 ### Requirement: Use FreeBSD reaper ownership and targeted wakes
 FreeBSD SHALL provide kernel reaper ownership including nested reapers, fresh owned-child enumeration/signalling and a reliable targeted wake for paused cleanup. Wake setup failure SHALL refuse startup without host sysctl/module changes; query/signal failures SHALL remain failures.
 

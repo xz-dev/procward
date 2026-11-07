@@ -76,6 +76,24 @@ responses sequence actions; polling has fixed deadlines, not readiness sleeps.
 Tests distinguish stopped, zombie, gone and query failure. The stale-pidfd test
 checks stable-handle safety; it does not force numeric PID reuse in the kernel.
 
+Linux cleanup has two backends (see
+[platforms.md](platforms.md#linux-workload-group-and-fallback)). Hosts without a
+writable own cgroup run the fallback, and exact-stderr tests accept only its one
+startup diagnostic. `tests/boundary.rs` adds a fully root guardian whose
+signalable child must die at KILL while the guardian lives; this simulates a
+live ancestor that blocks adoption, not a D-state task. Boundary expectations
+select the backend from that diagnostic: a real `cgroup.kill` also ends root
+members. `tests/cgroup.rs` is the real delegated-cgroup gate:
+
+```sh
+PROCWARD_TEST_CGROUP_PARENT=/sys/fs/cgroup cargo test --locked --test cgroup -- --nocapture --test-threads=1
+```
+
+It needs an existing cgroup v2 directory that the current user can already
+write, and it must not use sudo. It creates one fresh `procward-test-*` group,
+moves only a freshly spawned shell into it, and kills and removes only that
+group on failure. Without the variable it prints `CGROUP-NOT-RUN`.
+
 FreeBSD guest fixtures exercise nested reapers, stopped adoption, healthy orphan
 reaping, targeted parent-death SIGCONT and kernel query errors. Windows fixtures
 check kill-on-close Job membership at payload startup, launch restrictions,

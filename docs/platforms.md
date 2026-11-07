@@ -5,10 +5,57 @@ Final documentation/release setup remains pending.
 
 | Backend | Authority and completion | Limits |
 | --- | --- | --- |
-| Linux | Subreaper ancestry, birth-checked pidfds or unreaped direct-child authority; wait until ECHILD | Missing pidfds visibly limit nondirect freezing, not direct-child reaper cleanup; descendants the OS forbids this user to signal stay known survivors |
+| Linux | Preferred: an owned cgroup v2 workload group, joined before the payload can fork; KILL phase writes `cgroup.kill`; wait until ECHILD and an unpopulated group. Fallback (one visible startup diagnostic): subreaper ancestry, birth-checked pidfds or unreaped direct-child authority, KILL to retained nondirect pidfds; wait until ECHILD | Group needs existing delegation of the owner's own cgroup; no host changes. Missing pidfds visibly limit nondirect freezing and recursive KILL, not direct-child reaper cleanup; in the fallback, descendants the OS forbids this user to signal stay known survivors. SIGKILL cannot end a task in an uninterruptible kernel wait; it then fails at the deadline |
 | FreeBSD | Acquired procctl reaper domain, fresh status/pids, nested-reaper subtree KILL and child waits | Required targeted wake/query/signal errors fail startup or cleanup, except signal EPERM: such descendants stay known survivors; no sysctl/module changes |
 | Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised; Job termination does not depend on descendant process DACLs |
 | macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape; descendants the OS forbids this user to signal stay known survivors |
+
+## Linux workload group and fallback
+
+At startup the owner tries to create `procward-<pid>-<time>` inside its own
+current cgroup v2 group (`/proc/self/cgroup` below the visible `cgroup2`
+mount). It never creates the group anywhere else and never changes controllers,
+delegation, mounts, permissions or services. It proves `cgroup.kill` by writing
+it on the new, still empty group, and proves membership transfer with a
+short-lived trusted probe. Then the owner passes the group directory handle to
+the anchor. A trusted procward stage (`__cgroup_exec`, or the terminal launch
+stage under a private PTY) writes itself to `cgroup.procs` and closes the handle.
+Only then does it `execve` the payload, so every payload fork is a member. The
+owner, anchor and terminal keeper stay in the original group. The KILL phase
+writes `cgroup.kill`, which kills every member and nested group without a
+signal-permission check. Completion needs ECHILD and `populated 0` in
+`cgroup.events`. The creating owner keeps the group handle across anchor loss,
+kills the group in its own cleanup, and removes the group and any empty nested
+groups (deepest first) through retained directory handles. If a member cannot
+be killed, the group stays in place and procward reports that.
+
+If any step fails (no writable own group, no `cgroup.kill`, migration denied),
+the owner prints exactly one line:
+`procward: Linux cgroup v2 workload group unavailable (<reason>); cleanup falls
+back to subreaper and pidfd termination`. This is the only output difference;
+payload stdout/stderr bytes are unchanged. No line is printed when the group
+is in use. The fallback keeps the subreaper and adds identity-safe recursive
+KILL. Nondirect descendants are reached only through parent/birth edges
+validated around `pidfd_open`. Their pidfds are retained, so identity survives
+reparenting, and stale numeric PIDs are never signalled. A live ancestor that
+never exits, for example a credential-denied one, therefore no longer shields
+a signalable descendant until adoption. Grace TERM still goes to adopted
+direct children only. Both backends keep the original policy start and
+deadline through anchor/owner failover; no descendant gets a fresh grace.
+
+Neither backend is stronger than SIGKILL. A task in an uninterruptible kernel
+wait can survive until the deadline. Procward then exits 125 and does not
+claim cleanup. The tests do not create real D-state tasks. The credential-denied
+guardian in `tests/boundary.rs` simulates a live ancestor that blocks adoption;
+it is not an unkillable task. SIGSTOP is not treated as unkillable.
+
+`tests/cgroup.rs` is real delegated-cgroup integration. It runs only when
+`PROCWARD_TEST_CGROUP_PARENT` names an existing, already writable cgroup v2
+directory. It creates one fresh test group there and moves only a freshly
+spawned shell into it before that shell execs procward. It checks payload
+membership before the first fork, nested groups, anchor-loss failover,
+unrelated-process survival and group removal. Without the variable it prints
+`CGROUP-NOT-RUN`; that is not a pass. CI does not set it.
 
 ## Descendants across an access boundary
 
@@ -29,6 +76,11 @@ own process DACL to deny Everyone.
   program that keeps our real UID stays signalable. One that switched all UIDs,
   as `sudo` does, returns EPERM. FreeBSD's default
   `security.bsd.conservative_signals` also limits signals to set-ID processes.
+- **Linux workload group:** `cgroup.kill` is a kernel kill that credential
+  checks cannot deny. When the group is in use, a fully root member is killed
+  at the KILL phase and the payload status is kept; TERM during grace can
+  still be denied and reported. The Unix denial rules below apply to the Linux
+  fallback.
 - **Unix denial:** each backend reports `<OS> denied signals to privileged
   descendant <pid>; it remains a known survivor` once per descendant. The
   descendant still blocks completion; if it remains at the cleanup deadline,
@@ -96,6 +148,9 @@ not the outer layer's environment or lifecycle endpoint. See
 
 - **Linux:** a subreaper can run below another subreaper. Inner reaping stays
   local while healthy; on loss, ancestor reapers adopt and clean remaining work.
+  With a workload group, the inner owner is a member of the outer group and
+  creates its own group inside it; the outer `cgroup.kill` covers both, and the
+  outer owner removes empty nested groups that an inner owner left.
   Nesting tests include a detached branch and stopped, TERM-ignoring worker.
 - **FreeBSD:** each layer acquires its own reaper domain. Cleanup includes nested
   reapers, not only ordinary direct children. The nested fixture also acquires a
