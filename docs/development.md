@@ -10,11 +10,44 @@ or use pi-env source/fixtures.
 ## Build and checks
 
 ```sh
+# Host: compile only; do not execute Linux fixtures here.
 cargo build --locked --bins --examples
-cargo test --locked --all-targets
+cargo test --locked --all-targets --no-run
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
+
+# Linux: use a disposable full-system QEMU VM.
+python3 ci/vm-test.py --kernel <installed-kernel-version-or-image>
+python3 ci/vm-test.py --kernel <installed-kernel-version-or-image> --hazard
 ```
+
+On FreeBSD, macOS and Windows, keep the native `cargo test --locked --all-targets`
+entrypoint. Cargo's Linux runner refuses execution without a separate-kernel VM
+manifest; Docker and `qemu-user` alone do not satisfy that boundary.
+
+The Linux host runner reuses `virtme-run`, an existing compatible kernel/modules
+and QEMU/KVM. It builds binaries and examples without executing them, inventories
+Cargo's JSON test artifacts, then runs each test in a fresh guest cgroup in both
+cgroup-enabled and forced-fallback modes. Host root and the manifest are exported
+read-only with `--force-9p`; the guest has 2 vCPUs, 2 GiB RAM and no network.
+Guest scratch is tmpfs. Kernel/launcher selection is configurable; missing
+prerequisites fail rather than falling back to host execution. The host's
+independent deadline ends the entire VM and reaps its processes. A distinct
+boot ID, every individual result and a matching completion record are required;
+VM death, missing records, OOM-assisted cleanup or harness rescue are not passes.
+Logs and machine-readable summaries default to `/var/tmp/procward-vm/run-*`.
+The three runner control checks are `--selftest ok`, `--selftest exit7` and
+`--selftest hang` (the latter two must fail, not pass).
+
+`--hazard` selects only the ignored adversarial integration test in its own VM,
+with a hard 10-second host deadline. The ordinary suite does not silently count
+that case as executed. Run both commands for full local Linux coverage.
+
+**CI migration gate:** the existing GNU, musl and riscv64 CI/release jobs do not
+yet provision this full-system execution environment. They now refuse at an
+explicit preflight instead of running fixtures on the host or through bare
+qemu-user. Remote full-matrix VM provisioning and CI verification remain pending;
+do not merge or release on the strength of local results alone.
 
 Build binaries and examples explicitly before focused or `--all-targets` tests:
 the example's test harness is not its executable image, and the native Darwin
@@ -86,13 +119,46 @@ select the backend from that diagnostic: a real `cgroup.kill` also ends root
 members. `tests/cgroup.rs` is the real delegated-cgroup gate:
 
 ```sh
-PROCWARD_TEST_CGROUP_PARENT=/sys/fs/cgroup cargo test --locked --test cgroup -- --nocapture --test-threads=1
+python3 ci/vm-test.py --kernel <installed-kernel-version-or-image> --mode cgroup
 ```
 
-It needs an existing cgroup v2 directory that the current user can already
-write, and it must not use sudo. It creates one fresh `procward-test-*` group,
-moves only a freshly spawned shell into it, and kills and removes only that
-group on failure. Without the variable it prints `CGROUP-NOT-RUN`.
+The VM runner supplies `PROCWARD_TEST_CGROUP_PARENT` to `tests/cgroup.rs` inside
+each fresh guest group. The test creates one fresh `procward-test-*` group,
+moves only its freshly spawned shell into it, and kills/removes only that group
+on failure. Without the variable it prints `CGROUP-NOT-RUN`, which is not proof
+of that backend. The forced-fallback pass records these cgroup-only tests as
+not applicable, separately from passes. Do not run the old environment-variable
+command directly on the host; it does not put other tests inside a VM.
+
+Small Linux regressions cover the review repairs. A background job on a TOSTOP
+terminal must not leak the denied fallback diagnostic or cause a SIGTTOU storm
+(`tests/terminal.rs`). A live TERM-ignoring root with 48 TERM-ignoring children
+under `RLIMIT_NOFILE` 32 must still be killed within the original deadline
+(`tests/cli.rs`). After owner SIGKILL the surviving anchor must remove the empty
+workload group (`tests/cgroup.rs`). Where the test's own cgroup is writable, the
+TOSTOP and descriptor tests run procward in a fresh child group with
+`cgroup.max.descendants` 0, so they exercise the fallback.
+
+`tests/fixtures/pwbomb-original.c` is the independent review reproducer, kept
+byte-for-byte and never built. `tests/fixtures/hazard.rs` is its faithful port
+(fixture mode `pwbomb`): uncapped rolling fork chain, deep and wide subtrees,
+TERM ignored. It refuses to fork without separate-kernel VM proof and an own
+cgroup inside `PROCWARD_HAZARD_GROUP` with finite `pids.max` <= 768 and
+`memory.max` <= 512 MiB. `tests/hazard.rs` preserves the real failure case:
+product cgroup unavailable, `RLIMIT_NOFILE` 32, all three adversarial branches
+actually started, task population above the descriptor limit, original cleanup
+deadline, no unrelated-process kill and no survivors. It also checks that OOM
+did not do the cleanup. The unchanged original C source is never built or run.
+
+The first VM run exposed another real defect: rescanning the full inventory
+between every reaped zombie exhausted the original 2-second deadline. Cleanup
+now drains ready child exits before another scan, checking the same deadline
+during the drain. Four independent bounded VM runs then completed in about
+0.53–0.79 seconds, with task peaks 452/637/638/412, no OOM and no harness rescue.
+The final case waits for observed branch entry and a population peak of at least
+400 instead of sleeping to infer load readiness.
+These are regression observations, not a kernel-atomic guarantee for every
+possible uncontained adversarial workload.
 
 FreeBSD guest fixtures exercise nested reapers, stopped adoption, healthy orphan
 reaping, targeted parent-death SIGCONT and kernel query errors. Windows fixtures
@@ -135,14 +201,11 @@ grace signals without blocking KILL. The non-default late-loss
 fixture uses 2s/1s/2500ms; discarding the record made its negative control fail at
 2.821 seconds. Loss before publication is a separate checked case.
 
-Linux runs from this agent use task-owned `pw-*` tmux sessions outside the
-installed pi subreaper. The existing server has PPID 1; no `wakeup` session was
-modified. Example:
-
-```sh
-tmux new-session -d -s pw-tests \
-  'cd /path/to/procward; cargo build --locked --bins --examples && cargo test --locked --all-targets > /tmp/pw-tests.log 2>&1; echo $? > /tmp/pw-tests.status'
-```
+Historical pre-VM checks used task-owned `pw-*` tmux sessions to avoid the
+installed pi subreaper's unreaped zombies. That was not an independent safety
+boundary and is no longer a supported Linux test entrypoint; use the full-system
+VM commands above. The records below describe those earlier checks, not commands
+to repeat on the host.
 
 Test-only rescue is explicit, identity-safe and leaves failed runs failed.
 Pipe drain and child exit are observed separately with deadlines, so a dead

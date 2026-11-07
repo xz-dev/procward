@@ -40,6 +40,14 @@ Arguments execute directly, without an added shell. Durations use integer `s`
 or `ms`; require `0 < fatal-grace <= grace < cleanup-deadline`. Defaults are
 6s, 3s and 7500ms. Use `procward --help` for options.
 
+## Development
+
+Run Linux integration tests only in the disposable full-system VM:
+`python3 ci/vm-test.py --kernel <installed-kernel>` and the separate `--hazard`
+run. Host Cargo execution is guarded; containers and qemu-user alone are not
+isolation. See [development](docs/development.md#build-and-checks) for prerequisites,
+static checks, result records and the pending CI migration gate.
+
 ## Background
 
 Procward originated from the process-ownership needs of

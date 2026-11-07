@@ -48,6 +48,24 @@ Fault tests SHALL measure at most 8 seconds from injection to platform completio
 - **WHEN** test cleanup must rescue a known survivor
 - **THEN** the failed run stays failed and identifies the rescue
 
+### Requirement: Isolate every Linux runtime test in a complete VM
+Linux integration tests SHALL execute only inside a disposable full-system VM with a kernel distinct from the host, fixed CPU/memory resources, no writable live host workspace sharing and an independent host hard deadline. The host MAY compile artifacts and perform static checks but SHALL refuse direct fixture execution, including container-only and bare qemu-user execution. A matching guest completion record and every individual result SHALL be required; missing records, VM death or external rescue SHALL NOT count as a product pass. Missing executor prerequisites SHALL fail closed, including CI/release jobs awaiting VM provisioning.
+
+#### Scenario: Developer invokes Cargo tests directly on Linux
+- **WHEN** no separate-kernel VM manifest is present
+- **THEN** the runtime entrypoint refuses before launching the test executable and points to the supported VM runner
+
+#### Scenario: Guest exits before reporting complete results
+- **WHEN** the guest fails, hangs or returns without all results and its completion record
+- **THEN** the host runner fails the run, ends/reaps its own VM processes and does not infer success from VM shutdown
+
+### Requirement: Preserve and safely exercise the original rolling-fork reproducer
+The test suite SHALL retain the original review reproducer and a faithful runnable fixture with uncapped rolling PID turnover, deep/wide branches and ignored TERM. The runnable fixture SHALL refuse before fork without separate-kernel proof and verified finite process/memory caps. The adversarial integration case SHALL run in its own independently limited VM, with the product cgroup unavailable and descriptor limit below the observed workload population. It SHALL observe branch startup/population rather than use elapsed time as readiness; original product deadlines SHALL remain unchanged. OOM, scope rescue or VM watchdog intervention SHALL remain test failures, never product cleanup.
+
+#### Scenario: Descriptor pressure and continuous PID turnover coexist
+- **WHEN** the original adversarial branches are running above the controller's descriptor limit and cleanup is requested without a product cgroup
+- **THEN** the controller terminates and reaps its owned work within the original deadline, preserves the primary's native result, and leaves unrelated work alive without external rescue
+
 ### Requirement: Use early CI and ordinary fix-forward work
 As soon as the Linux walking skeleton compiles, development SHALL publish it and enable the full push/PR platform matrix rather than waiting for all backends. Failing applicable platform tests SHALL remain visible as work lands. Developers SHALL be able to rerun flaky jobs normally and fix forward; once-only packets, sealed manifests, pre-rerun classification approvals and per-step independent reviews SHALL NOT be required. Reruns SHALL not alter assertions or erase previous logs.
 
@@ -60,7 +78,7 @@ As soon as the Linux walking skeleton compiles, development SHALL publish it and
 - **THEN** the rerun is permitted without a special packet or review ritual and original logs remain attributable
 
 ### Requirement: Release only complete applicable coverage
-Before v0.1.0, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. The two riscv64 rows SHALL execute under explicitly labelled, pinned qemu-user/container emulation; host-kernel syscall semantics and nonrepresentative timings SHALL be disclosed. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
+Before release, the full applicable suite SHALL pass for Linux GNU/musl x64/arm64/riscv64, FreeBSD x64/arm64 guests, macOS x64/arm64 and Windows x64/arm64. All Linux runtime rows SHALL use a complete guest kernel as their outer execution boundary. Any target-ABI qemu-user/container layer MAY run only inside that boundary and SHALL be explicitly labelled; it SHALL NOT be represented as full-system isolation or native hardware validation. Test output SHALL identify actual source/target/executor and results without a custom sealed evidence system. Build-only success SHALL not replace runtime acceptance.
 
 #### Scenario: An emulated capability is absent
 - **WHEN** runtime probing in an explicitly labelled qemu-user executor finds seccomp installation ENOSYS or broken std spawn error reporting for a known-missing path

@@ -5,7 +5,7 @@ Final documentation/release setup remains pending.
 
 | Backend | Authority and completion | Limits |
 | --- | --- | --- |
-| Linux | Preferred: an owned cgroup v2 workload group, joined before the payload can fork; KILL phase writes `cgroup.kill`; wait until ECHILD and an unpopulated group. Fallback (one visible startup diagnostic): subreaper ancestry, birth-checked pidfds or unreaped direct-child authority, KILL to retained nondirect pidfds; wait until ECHILD | Group needs existing delegation of the owner's own cgroup; no host changes. Missing pidfds visibly limit nondirect freezing and recursive KILL, not direct-child reaper cleanup; in the fallback, descendants the OS forbids this user to signal stay known survivors. SIGKILL cannot end a task in an uninterruptible kernel wait; it then fails at the deadline |
+| Linux | Preferred: an owned cgroup v2 workload group, joined before the payload can fork; KILL phase writes `cgroup.kill`; wait until ECHILD and an unpopulated group. Fallback (one attempted startup diagnostic): subreaper ancestry, birth-checked pidfds or unreaped direct-child authority, KILL through a streaming nondirect pidfd walk; wait until ECHILD | Group needs existing delegation of the owner's own cgroup; no host changes. Missing pidfds visibly limit nondirect freezing and recursive KILL, not direct-child reaper cleanup; in the fallback, descendants the OS forbids this user to signal stay known survivors. SIGKILL cannot end a task in an uninterruptible kernel wait; it then fails at the deadline |
 | FreeBSD | Acquired procctl reaper domain, fresh status/pids, nested-reaper subtree KILL and child waits | Required targeted wake/query/signal errors fail startup or cleanup, except signal EPERM: such descendants stay known survivors; no sysctl/module changes |
 | Windows | process-wrap Tokio JobObject + KillOnDrop, assignment while suspended, explicit Job completion after primary exit | No inherited/leaked private Job handle; Unix job control is not advertised; Job termination does not depend on descendant process DACLs |
 | macOS | Independent observer, retained PID/birth/effective/real/saved-UID observations; completed sweep with no known survivors | Best-effort, not kernel containment; reparenting before outer observation (including early observer loss), fast setsid, final-scan forks and final identity-check/use races can escape; descendants the OS forbids this user to signal stay known survivors |
@@ -26,22 +26,47 @@ writes `cgroup.kill`, which kills every member and nested group without a
 signal-permission check. Completion needs ECHILD and `populated 0` in
 `cgroup.events`. The creating owner keeps the group handle across anchor loss,
 kills the group in its own cleanup, and removes the group and any empty nested
-groups (deepest first) through retained directory handles. If a member cannot
-be killed, the group stays in place and procward reports that.
+groups (deepest first) through retained directory handles. The anchor also
+receives the parent directory handle and the group name; it checks that the name
+is `procward-*` and names the same directory as its group handle. It removes the
+group only when the owner is lost and its own cleanup has confirmed the group
+empty; while the owner lives, removal stays with the owner's own completion
+check. A group that is already gone counts as removed, so both roles may try.
+If a member cannot be killed, the group stays in place and procward reports
+that. The KILL phase does no pidfd walk while the group is in use, because
+`cgroup.kill` already reaches every member.
 
 If any step fails (no writable own group, no `cgroup.kill`, migration denied),
-the owner prints exactly one line:
+the owner attempts to write exactly one line:
 `procward: Linux cgroup v2 workload group unavailable (<reason>); cleanup falls
 back to subreaper and pidfd termination`. This is the only output difference;
 payload stdout/stderr bytes are unchanged. No line is printed when the group
-is in use. The fallback keeps the subreaper and adds identity-safe recursive
-KILL. Nondirect descendants are reached only through parent/birth edges
-validated around `pidfd_open`. Their pidfds are retained, so identity survives
-reparenting, and stale numeric PIDs are never signalled. A live ancestor that
-never exits, for example a credential-denied one, therefore no longer shields
-a signalable descendant until adoption. Grace TERM still goes to adopted
-direct children only. Both backends keep the original policy start and
-deadline through anchor/owner failover; no descendant gets a fresh grace.
+is in use. Every procward diagnostic is one `write(2)` attempt to stderr, with
+no retry on EINTR or EIO and no TTIN/TTOU masking. When the kernel denies it,
+for example a background job on a TOSTOP terminal, the line is dropped and the
+job receives the kernel's normal SIGTTOU. On Linux the owner and anchor catch
+TTIN/TTOU without `SA_RESTART`, so a denied write fails once instead of
+restarting in a SIGTTOU loop.
+
+The fallback keeps the subreaper and adds identity-safe recursive KILL.
+Nondirect descendants are reached only through parent/birth edges validated
+around `pidfd_open`. The KILL walk streams: it opens one pidfd, checks the
+child's and parent's birth again, sends KILL, and closes it before going on, so
+descriptor use does not grow with the tree. Handles retained by job-control
+freezing get KILL once and are then released. Stale numeric PIDs of nondirect
+descendants are never signalled. EMFILE/ENFILE only leave the current pass
+incomplete; cleanup keeps retrying until the original deadline. An unreaped
+direct child without a pidfd is still signalled by PID, which cannot be reused
+before reap. Each walk checks the original deadline at every step, so a rolling
+child tree cannot extend it. A live ancestor that never exits, for example a
+credential-denied one, therefore no longer shields a signalable descendant until
+adoption. Grace TERM still goes to adopted direct children only. Both backends
+keep the original policy start and deadline through anchor/owner failover; no
+descendant gets a fresh grace. Ready exits are reaped in a batch before the next
+inventory scan; neither a large zombie backlog nor a continuously changing tree
+gets a replacement deadline. The recursive fallback is not a kernel-atomic
+kill-all primitive: concurrent forks still require repeated observation and
+progress within the original budget.
 
 Neither backend is stronger than SIGKILL. A task in an uninterruptible kernel
 wait can survive until the deadline. Procward then exits 125 and does not
@@ -55,7 +80,12 @@ directory. It creates one fresh test group there and moves only a freshly
 spawned shell into it before that shell execs procward. It checks payload
 membership before the first fork, nested groups, anchor-loss failover,
 unrelated-process survival and group removal. Without the variable it prints
-`CGROUP-NOT-RUN`; that is not a pass. CI does not set it.
+`CGROUP-NOT-RUN`; that is not a pass. The full-system Linux VM runner supplies
+it in the cgroup-enabled pass. Linux fixtures run only through
+`ci/vm-test.py`, with the separate `--hazard` run for the preserved uncapped
+rolling/deep/wide reproducer; see [development.md](development.md#build-and-checks).
+The old CI/release Linux runtime entrypoints are blocked until their full-system
+VM executors are configured. Local validation is not remote CI acceptance.
 
 ## Descendants across an access boundary
 
@@ -121,7 +151,8 @@ Linux/FreeBSD have a shell-facing owner and a reaper anchor. Noninteractive
 anchors use a separate process group; interactive native roles share the caller's
 job group and catch TTIN/TTOU without masking them. Both handlers disable
 SA_RESTART: a foreground-reclaim race must return EINTR to cleanup rather than
-restart a denied terminal read/write indefinitely. Both can reap; the surviving
+restart a denied terminal read/write indefinitely. On Linux noninteractive
+roles disable it too, so a denied diagnostic write fails once. Both can reap; the surviving
 role cleans after the other dies. The
 anchor's required parent-death SIGCONT wake is armed and its live parent checked
 before launch permission. A close-on-exec pipe carries the one launch grant and

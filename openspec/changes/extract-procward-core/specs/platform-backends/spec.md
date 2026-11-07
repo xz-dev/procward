@@ -35,7 +35,7 @@ Linux SHALL provide child-subreaper ownership, safe stable-target signalling and
 - **THEN** startup denies payload side effects and cleans up already created roles
 
 ### Requirement: Prefer an owned Linux cgroup v2 workload group with a visible fallback
-Linux SHALL try to create a workload group only inside the owner's own current cgroup v2 group, prove `cgroup.kill` on that empty group, and join the payload before it can execute or fork, while owner, anchor and terminal keeper stay outside. KILL SHALL cover the whole group; completion SHALL need ECHILD and an unpopulated group; the creating owner SHALL keep the group across anchor loss and remove only its own empty groups. Procward SHALL NOT change host controllers, delegation, mounts, permissions or services. Without usable delegation procward SHALL print exactly one startup diagnostic and keep the subreaper backend with KILL to retained, identity-validated nondirect pidfds. Neither backend SHALL claim more than SIGKILL: a live or unknown member SHALL NOT be reported as clean, and the original deadline SHALL NOT be extended.
+Linux SHALL try to create a workload group only inside the owner's own current cgroup v2 group, prove `cgroup.kill` on that empty group, and join the payload before it can execute or fork, while owner, anchor and terminal keeper stay outside. KILL SHALL cover the whole group; completion SHALL need ECHILD and an unpopulated group; the creating owner SHALL keep the group across anchor loss and remove only its own empty groups; after owner loss the surviving anchor SHALL remove the confirmed-empty group through the owner's parent handle and group name, and an already-removed group SHALL count as removed. Procward SHALL NOT change host controllers, delegation, mounts, permissions or services. Without usable delegation procward SHALL attempt exactly one startup diagnostic and keep the subreaper backend with KILL through a streaming walk of identity-validated nondirect pidfds that holds a constant number of descriptors, treats EMFILE/ENFILE as an incomplete pass and stops at the original deadline. A diagnostic SHALL be one write attempt without TTIN/TTOU masking or EINTR/EIO retry; a kernel-denied diagnostic MAY be dropped. Neither backend SHALL claim more than SIGKILL: a live or unknown member SHALL NOT be reported as clean, and the original deadline SHALL NOT be extended.
 
 #### Scenario: Delegated group is usable
 - **WHEN** the owner's own cgroup accepts a new child group with `cgroup.kill` and membership transfer
@@ -43,7 +43,11 @@ Linux SHALL try to create a workload group only inside the owner's own current c
 
 #### Scenario: Delegation is absent
 - **WHEN** the owner cannot create or use a group in its own cgroup
-- **THEN** startup prints the fallback diagnostic once and cleanup uses the subreaper and recursive pidfd KILL
+- **THEN** startup attempts the fallback diagnostic once and cleanup uses the subreaper and recursive pidfd KILL
+
+#### Scenario: Diagnostic from a background job on a TOSTOP terminal
+- **WHEN** the fallback diagnostic is written to a TOSTOP terminal by a background job
+- **THEN** the kernel denial stands, no diagnostic bytes reach the terminal, and the job sees no repeated SIGTTOU
 
 #### Scenario: Live ancestor blocks adoption in the fallback
 - **WHEN** a credential-denied ancestor stays alive above a signalable TERM-ignoring descendant
