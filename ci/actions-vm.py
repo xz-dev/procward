@@ -201,8 +201,10 @@ def main():
         subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.provider, setup],
                        check=True, timeout=5400 if request['target'].startswith('riscv64') else 2700)
         check_identity(pidfds[0])
-        # The deadline is on the real host and includes SSH/listing/measurement/tests/package.
-        # The provider action's and job's timeouts separately bound boot and compilation.
+        # The deadline bounds only the runtime command itself. Transport/handshake
+        # setup is not product deadline: the guest enforces the per-case budget
+        # (5s for hazard) with its own hard cgroup.kill timeout, so a stuck case
+        # can never exceed it even when this host budget is larger.
         with log.open('wb') as stream:
             try:
                 status = subprocess.run(

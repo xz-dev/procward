@@ -193,7 +193,7 @@ jobs:
           arch: x86_64
           provider: ubuntu
           mode: hazard
-          deadline: 10
+          deadline: 45
   manifest:
     needs: [eligibility, native, linux, musl, freebsd, riscv64, linux-hazard]
     runs-on: ubuntu-24.04

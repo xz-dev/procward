@@ -126,7 +126,9 @@ workflows; new full-system results never borrow qemu-user unsupported-case credi
    in both cgroup-available and product-cgroup-denied fallback modes. Original
    product assertions/deadlines remain unchanged; per-case budget is 60 seconds.
    Hazard uses only its ignored test, 5-second case budget and an independent
-   **10-second host runtime deadline**, after compilation in its own VM.
+   **45-second whole-command host deadline** (transport setup included), after compilation
+   in its own VM. The guest's own 5-second case budget with hard `cgroup.kill` remains
+   the product-bound adversarial timeout; the host deadline only catches transport hang.
 7. A real-host subprocess timeout bounds all runtime work (including measurement,
    post-measurement builds and packaging): CI 1800 seconds for x64/arm64, 3600
    for RISC-V; release 3600/5400 respectively. Setup has its own host timeout

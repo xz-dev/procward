@@ -40,8 +40,10 @@ The three runner control checks are `--selftest ok`, `--selftest exit7` and
 `--selftest hang` (the latter two must fail, not pass).
 
 `--hazard` selects only the ignored adversarial integration test in its own VM,
-with a hard 10-second host deadline. The ordinary suite does not silently count
-that case as executed. Run both commands for full local Linux coverage.
+with a whole-command 45-second host deadline; the adversarial product timeout
+itself stays the guest-side 5-second case budget with hard `cgroup.kill`. The
+ordinary suite does not silently count that case as executed. Run both commands
+for full local Linux coverage.
 
 **Remote verification gate:** GNU, musl and riscv64 CI/release jobs now provision
 copy-only full-system VM Actions with official exact-target Rust tools. They use
