@@ -46,6 +46,14 @@ jobs:
           rustup update stable --no-self-update
           rustc -vV
           test "$(rustc -vV | sed -n 's/host: //p')" = '${{ matrix.target }}'
+      - name: Linux dist compile only
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
+          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
+      - name: Require isolated Linux runtime executor
+        if: runner.os == 'Linux'
+        run: python3 ci/linux-test-guard.py --check-only
       - name: Measure and build smallest distribution
         shell: bash
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}' --measure
@@ -90,6 +98,12 @@ jobs:
             echo "CARGO_TARGET_${{ matrix.key }}_LINKER=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin/rust-lld"
             echo 'CARGO_TARGET_${{ matrix.key }}_RUNNER=bash .github/scripts/run-musl.sh'
           } >> "$GITHUB_ENV"
+      - name: Static musl dist compile only
+        run: |
+          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
+          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
+      - name: Require isolated Linux runtime executor
+        run: python3 ci/linux-test-guard.py --check-only
       - name: Measure and build smallest static distribution
         env:
           PROCWARD_CI_IMAGE: ${{ steps.images.outputs.runtime }}
@@ -180,10 +194,6 @@ jobs:
             echo "binfmt=$(sed -n 's/^FROM //p' ci/images/binfmt/Dockerfile)"
           } >> "$GITHUB_OUTPUT"
           echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: riscv64
-          image: ${{ steps.images.outputs.binfmt }}
       - name: Official cross toolchain and target runtime
         run: |
           git rev-parse HEAD
@@ -196,10 +206,18 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
           fi
-          echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
-          cat /proc/sys/fs/binfmt_misc/qemu-riscv64
-          docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
-      - name: Prepare pinned fixture runtime with Python
+      - name: Riscv64 dist compile only
+        run: |
+          cargo build --locked --profile dist --target '${{ matrix.target }}' --bins --examples
+          cargo test --locked --profile dist --target '${{ matrix.target }}' --all-targets --no-run
+          readelf -h 'target/${{ matrix.target }}/dist/procward' | grep 'Machine:.*RISC-V'
+      - name: Require isolated Linux runtime executor
+        run: python3 ci/linux-test-guard.py --check-only
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: riscv64
+          image: ${{ steps.images.outputs.binfmt }}
+      - name: Prepare pinned fixture runtime with Python (inside VM only)
         run: |
           docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
           echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"

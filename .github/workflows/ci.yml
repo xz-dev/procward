@@ -34,6 +34,21 @@ jobs:
       - name: Release safety regression tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: python3 .github/scripts/test-release.py
+      - name: Linux host compile and static checks
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked --bins --examples
+          cargo test --locked --all-targets --no-run
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo fmt --check
+      - name: MSRV
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal --no-self-update
+          cargo +1.87.0 check --locked --all-targets
+      - name: Require isolated Linux runtime executor
+        if: runner.os == 'Linux'
+        run: python3 ci/linux-test-guard.py --check-only
       - name: Full standalone fixture suite
         run: |
           cargo build --locked --bins --examples
@@ -41,11 +56,6 @@ jobs:
       - name: Distribution size and startup (informational)
         shell: bash
         run: python3 .github/scripts/build-dist.py '${{ matrix.target }}'
-      - name: MSRV
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: |
-          rustup toolchain install 1.87.0 --profile minimal --no-self-update
-          cargo +1.87.0 check --locked --all-targets
   musl:
     name: ${{ matrix.target }}
     strategy:
@@ -63,7 +73,7 @@ jobs:
       - name: Read native musl image pin
         id: images
         run: echo "runtime=$(sed -n 's/^FROM //p' ci/images/alpine-native/Dockerfile)" >> "$GITHUB_OUTPUT"
-      - name: Native musl build and full fixture execution
+      - name: Native musl compile only
         run: |
           docker run --rm -v "$PWD:/src" -w /src '${{ steps.images.outputs.runtime }}' sh -ec '
             apk add --no-cache cargo rust musl-dev gcc git python3
@@ -71,6 +81,14 @@ jobs:
             rustc -vV
             test "$(rustc -vV | sed -n "s/host: //p" | sed "s/-alpine-/-unknown-/")" = "${{ matrix.target }}"
             cargo build --locked --bins --examples
+            cargo test --locked --all-targets --no-run
+          '
+      - name: Require isolated Linux runtime executor
+        run: python3 ci/linux-test-guard.py --check-only
+      - name: Native musl fixture execution (VM provisioning pending)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src '${{ steps.images.outputs.runtime }}' sh -ec '
+            apk add --no-cache cargo rust musl-dev gcc git python3
             cargo test --locked --all-targets --no-fail-fast -- --nocapture
           '
       - name: Static distribution size and startup (informational)
@@ -148,10 +166,6 @@ jobs:
             echo "binfmt=$(sed -n 's/^FROM //p' ci/images/binfmt/Dockerfile)"
           } >> "$GITHUB_OUTPUT"
           echo "PROCWARD_CI_IMAGE=$runtime" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: riscv64
-          image: ${{ steps.images.outputs.binfmt }}
       - name: Official cross toolchain and target runtime
         run: |
           git rev-parse HEAD
@@ -164,18 +178,22 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
           fi
-          echo 'emulated (qemu-user) — semantics of prctl/pidfd/process groups are passed through to the host kernel; timings are not representative'
-          cat /proc/sys/fs/binfmt_misc/qemu-riscv64
-          docker run --rm --platform linux/riscv64 '${{ steps.images.outputs.runtime }}' uname -m
-      - name: Prepare pinned fixture runtime with Python
-        run: |
-          docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
-          echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"
       - name: Cross-build exact release target and fixtures
         run: |
           cargo build --locked --release --target '${{ matrix.target }}' --bins --examples
+          cargo test --locked --release --target '${{ matrix.target }}' --all-targets --no-run
           file 'target/${{ matrix.target }}/release/procward' 'target/${{ matrix.target }}/release/examples/fixture'
           readelf -h 'target/${{ matrix.target }}/release/procward' | grep 'Machine:.*RISC-V'
+      - name: Require isolated Linux runtime executor
+        run: python3 ci/linux-test-guard.py --check-only
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: riscv64
+          image: ${{ steps.images.outputs.binfmt }}
+      - name: Prepare pinned fixture runtime with Python (inside VM only)
+        run: |
+          docker build --platform linux/riscv64 -t procward-fixture-runtime 'ci/images/${{ matrix.image }}'
+          echo 'PROCWARD_CI_IMAGE=procward-fixture-runtime' >> "$GITHUB_ENV"
       - name: Full suite against emulated release binaries
         id: fixtures
         run: |
