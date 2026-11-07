@@ -7,8 +7,7 @@ use rustix::{
 use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, HashSet},
-    fs, io, thread,
-    time::Duration,
+    fs, io,
 };
 
 pub struct Inventory(
@@ -253,26 +252,21 @@ impl Inventory {
                 }
                 // Wait for THIS member's death before hunting its children: a
                 // fork relay cannot out-fork a waiter, because each baton dies
-                // before its child is looked for. The original deadline still
-                // ends the wait and the whole pass. A kernel-denied member
-                // never dies by our hand; keep walking under it immediately.
-                while !self.expired() && !denied {
+                // before its child is looked for. A blocking waitid returns as
+                // soon as the kernel marks the SIGKILLed member dead, so the walk
+                // spends no polling CPU; the original deadline is still enforced
+                // between members, and a kernel-denied member is skipped at once.
+                if !denied {
                     match process::waitid(
                         process::WaitId::PidFd(fd.as_fd()),
-                        process::WaitIdOptions::EXITED
-                            | process::WaitIdOptions::NOHANG
-                            | process::WaitIdOptions::NOWAIT,
+                        process::WaitIdOptions::EXITED | process::WaitIdOptions::NOWAIT,
                     ) {
-                        Ok(Some(_)) | Err(Errno::INTR) => break,
-                        // No children authority over a non-child pidfd: fall back
-                        // to re-observation on the next pass once it is gone.
-                        Err(Errno::CHILD) => break,
-                        Ok(None) => {
-                            thread::sleep(Duration::from_millis(1));
-                            continue;
-                        }
+                        Ok(_) | Err(Errno::INTR) | Err(Errno::CHILD) => {}
                         Err(error) => return Err(error.into()),
                     }
+                }
+                if self.expired() {
+                    return Ok(());
                 }
                 drop(fd);
                 pending.push((pid, Some(observed)));
