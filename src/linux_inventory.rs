@@ -4,9 +4,11 @@ use rustix::{
     io::Errno,
     process::{self, Pid, PidfdFlags},
 };
+use std::os::fd::AsFd;
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
+    fs, io, thread,
+    time::Duration,
 };
 
 pub struct Inventory(
@@ -238,14 +240,39 @@ impl Inventory {
                     (Err(error), _) | (_, Err(error)) if !scarce(&error) => return Err(error),
                     _ => continue,
                 }
+                let mut denied = false;
                 match process::pidfd_send_signal(&fd, process::Signal::KILL) {
                     Ok(()) | Err(Errno::SRCH) => {}
                     Err(Errno::PERM) => {
+                        denied = true;
                         if !self.0.contains_key(&pid) {
                             self.report_denied(pid, observed);
                         }
                     }
                     Err(error) => return Err(error.into()),
+                }
+                // Wait for THIS member's death before hunting its children: a
+                // fork relay cannot out-fork a waiter, because each baton dies
+                // before its child is looked for. The original deadline still
+                // ends the wait and the whole pass. A kernel-denied member
+                // never dies by our hand; keep walking under it immediately.
+                while !self.expired() && !denied {
+                    match process::waitid(
+                        process::WaitId::PidFd(fd.as_fd()),
+                        process::WaitIdOptions::EXITED
+                            | process::WaitIdOptions::NOHANG
+                            | process::WaitIdOptions::NOWAIT,
+                    ) {
+                        Ok(Some(_)) | Err(Errno::INTR) => break,
+                        // No children authority over a non-child pidfd: fall back
+                        // to re-observation on the next pass once it is gone.
+                        Err(Errno::CHILD) => break,
+                        Ok(None) => {
+                            thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 drop(fd);
                 pending.push((pid, Some(observed)));

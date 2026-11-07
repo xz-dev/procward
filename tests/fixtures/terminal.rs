@@ -396,6 +396,7 @@ pub fn tostop_host(
     )]
     let owner = owner.spawn().unwrap();
     let pid = Pid::from_raw(owner.id() as i32).unwrap();
+    let started = Instant::now();
     let mut stops = 0;
     let code = loop {
         assert!(Instant::now() < deadline, "background procward deadline");
@@ -433,6 +434,11 @@ pub fn tostop_host(
     .max(0)
     .to_string();
     publish(dir.join("cpu-ms"), cpu.as_bytes()).unwrap();
+    publish(
+        dir.join("elapsed-ms"),
+        started.elapsed().as_millis().to_string().as_bytes(),
+    )
+    .unwrap();
     publish(dir.join("stops"), stops.to_string()).unwrap();
     publish(dir.join("witness-stop"), b"stop").unwrap();
     witness.wait().unwrap();
