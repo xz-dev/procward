@@ -387,18 +387,29 @@ fn scarce(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
 
+// A vanished observed process is not an inventory failure. Other errors stay unknown.
+fn vanished(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(Errno::SRCH.raw_os_error())
+}
+
 // Children of `parent` whose own stat still names it, with their birth; no handles are held.
 fn edges(parent: Pid) -> io::Result<Vec<(Pid, u64)>> {
     let tasks = match fs::read_dir(format!("/proc/{parent}/task")) {
         Ok(tasks) => tasks,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if vanished(&error) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     let mut observed = Vec::new();
     for task in tasks {
-        let text = match fs::read_to_string(task?.path().join("children")) {
+        let task = match task {
+            Ok(task) => task,
+            Err(error) if vanished(&error) => break,
+            Err(error) => return Err(error),
+        };
+        let text = match fs::read_to_string(task.path().join("children")) {
             Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if vanished(&error) => continue,
             Err(error) => return Err(error),
         };
         for raw in text.split_whitespace() {
@@ -409,7 +420,7 @@ fn edges(parent: Pid) -> io::Result<Vec<(Pid, u64)>> {
                 .ok_or_else(|| io::Error::other("invalid descendant PID"))?;
             let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
                 Ok(text) => text,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if vanished(&error) => continue,
                 Err(error) => return Err(error),
             };
             let actual_parent = stat
@@ -428,7 +439,7 @@ fn edges(parent: Pid) -> io::Result<Vec<(Pid, u64)>> {
 fn birth(pid: Pid) -> io::Result<Option<u64>> {
     match fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(text) => parse_birth(&text).map(Some),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if vanished(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -466,6 +477,15 @@ fn open_identity(pid: Pid) -> io::Result<Option<OwnedFd>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn procfs_disappearance_is_not_inventory_failure() {
+        for errno in [libc::ENOENT, libc::ESRCH] {
+            assert!(vanished(&io::Error::from_raw_os_error(errno)));
+        }
+        for errno in [libc::EPERM, libc::EACCES, libc::EIO, libc::EMFILE] {
+            assert!(!vanished(&io::Error::from_raw_os_error(errno)));
+        }
+    }
     #[test]
     fn birth_parser_handles_spaces_and_parentheses_in_comm() {
         let stat = "23 (worker ) (name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 0";

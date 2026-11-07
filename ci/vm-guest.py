@@ -42,7 +42,29 @@ def reap_orphans():
             return
 
 
+def oom_kills():
+    with open("/proc/vmstat") as stats:
+        for line in stats:
+            key, value = line.split()
+            if key == "oom_kill":
+                return int(value)
+    raise RuntimeError("guest OOM accounting is unavailable")
+
+
+def classify(mode, status, output, membership, rescue, leftovers, oom_delta=0):
+    passed = status == 0 and "test result: ok. 1 passed" in output
+    if (not passed or not membership or rescue or leftovers or oom_delta != 0
+            or "HARNESS RESCUE" in output):
+        return "fail"
+    if "CGROUP-NOT-RUN" in output:
+        return "fail" if mode == "cgroup" else "not-applicable"
+    if "BOUNDARY-NOT-RUN" in output:
+        return "not-applicable"
+    return "pass"
+
+
 def run_test(nonce, mode, binary, name, index, budget, cwd, hazard=False):
+    oom_before = oom_kills()
     relative = f"pwvm-{mode}-{index}"
     group = os.path.join(CGROUP, relative)
     os.mkdir(group)
@@ -100,19 +122,16 @@ def run_test(nonce, mode, binary, name, index, budget, cwd, hazard=False):
     output = log.read().decode(errors="replace")
     log.close()
     membership = f"MEMBERSHIP-OK 0::/{relative}" in output
-    passed = status == 0 and "test result: ok. 1 passed" in output
-    if not passed or not membership or rescue or leftovers or "HARNESS RESCUE" in output:
-        verdict = "fail"
-    elif "CGROUP-NOT-RUN" in output or "BOUNDARY-NOT-RUN" in output:
-        verdict = "not-applicable"
-    else:
-        verdict = "pass"
+    oom_delta = oom_kills() - oom_before
+    verdict = classify(mode, status, output, membership, rescue, leftovers, oom_delta)
     notes = [line for line in output.splitlines()
              if any(tag in line for tag in ("HARNESS", "NOT-RUN", "CGROUP-REAL", "TOSTOP ",
                                             "NOFILE-REGRESSION", "panicked", "HAZARD"))]
+    if oom_delta:
+        notes.append(f"GUEST-OOM: counter changed by {oom_delta}; not product cleanup")
     emit(nonce, kind="test", mode=mode, binary=os.path.basename(binary), test=name,
          status=status, verdict=verdict, membership=membership, rescue=rescue,
-         leftovers=leftovers, seconds=round(elapsed, 2), notes=notes[:20],
+         leftovers=leftovers, oom_kills=oom_delta, seconds=round(elapsed, 2), notes=notes[:20],
          output=output[-4000:] if verdict == "fail" else "")
     return [mode, os.path.basename(binary), name, verdict, status]
 
