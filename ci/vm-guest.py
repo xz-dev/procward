@@ -5,6 +5,10 @@
 # prints is "PROCWARD-VM <nonce> <json>"; the host trusts nothing else.
 import ctypes, json, os, signal, subprocess, sys, time
 
+# Every record also lands in this durable guest-side log; the host re-reads it
+# because a closing SSH channel can drop the stream's final lines.
+RECORD_LOG = '/tmp/procward-vm-records.log'
+
 MANIFEST = "/run/procward-vm/manifest.json"
 CGROUP = "/sys/fs/cgroup"
 JOIN = (
@@ -14,7 +18,10 @@ JOIN = (
 
 
 def emit(nonce, **record):
-    print(f"PROCWARD-VM {nonce} {json.dumps(record, sort_keys=True)}", flush=True)
+    line = f"PROCWARD-VM {nonce} {json.dumps(record, sort_keys=True)}"
+    print(line, flush=True)
+    with open(RECORD_LOG, 'a') as log:
+        print(line, file=log, flush=True)
 
 
 def populated(group):

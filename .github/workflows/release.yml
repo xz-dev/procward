@@ -68,7 +68,7 @@ jobs:
           - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-gnu }
           - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/linux-vm

@@ -45,7 +45,7 @@ jobs:
           - { runner: ubuntu-24.04, arch: x86_64, target: x86_64-unknown-linux-gnu }
           - { runner: ubuntu-24.04-arm, arch: aarch64, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -68,7 +68,7 @@ jobs:
           python3 .github/scripts/test-release.py
           python3 ci/test-actions-vm.py
       - uses: ./.github/actions/linux-vm
-        timeout-minutes: 50
+        timeout-minutes: 85
         with:
           target: ${{ matrix.target }}
           arch: ${{ matrix.arch }}

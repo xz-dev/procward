@@ -181,6 +181,8 @@ def main():
                     filters=['rolling_deep_wide_without_cgroup_survives_no_descriptor_shortcut'] if hazard else [],
                     skip=[], test_budget=5 if hazard else 60, cwd=str(ROOT))
     MANIFEST.write_text(json.dumps(manifest))
+    # A fresh run must not inherit a previous run's records.
+    open('/tmp/procward-vm-records.log', 'w').close()
     spec = importlib.util.spec_from_file_location('guest', ROOT / 'ci/vm-guest.py')
     guest = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guest)

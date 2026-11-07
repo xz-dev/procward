@@ -215,10 +215,29 @@ def main():
                 raise RuntimeError('HOST WATCHDOG RESCUE: VM runtime deadline exceeded')
         records = []
         prefix = 'PROCWARD-VM ' + request['nonce'] + ' '
-        for line in log.read_text(errors='replace').splitlines():
-            print(line)
-            if line.startswith(prefix):
-                records.append(json.loads(line[len(prefix):]))
+
+        def harvest(source):
+            found = []
+            for line in source.splitlines():
+                print(line)
+                if line.startswith(prefix):
+                    records.append(json.loads(line[len(prefix):]))
+                    found.append(line)
+            return found
+
+        # The redirected stream can miss final records when the SSH channel closes
+        # right after the guest prints them. The guest also persists the same lines
+        # to a durable log; prefer that authoritative copy once the VM is done.
+        harvested = harvest(log.read_text(errors='replace'))
+        guest_log = output / 'vm-guest-records.log'
+        with guest_log.open('wb') as stream:
+            subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+                            args.provider, 'cat /tmp/procward-vm-records.log'],
+                           stdout=stream, check=False, timeout=60)
+        replay = guest_log.read_text(errors='replace')
+        if len(replay.splitlines()) > len(harvested):
+            records.clear()
+            harvest(replay)
         (output / 'vm-results.json').write_text(json.dumps(records, indent=2) + '\n')
         validate(records, request, status)
         # Read only an explicit, flat list. Never copy the guest workspace back.
