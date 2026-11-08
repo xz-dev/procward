@@ -219,6 +219,14 @@ impl Inventory {
                 Err(error) if scarce(&error) => continue,
                 Err(error) => return Err(error),
             };
+            // Edges observed after the parent's confirmed death are final: a
+            // dead process cannot fork, so its children list can no longer
+            // grow. Descendants of death-confirmed parents skip the per-child
+            // parent-rebirth read below; halving /proc traffic keeps the walk
+            // inside the deadline on throttled vCPUs.
+            // The parent's own birth read doubles as the liveness probe: a
+            // vanished entry proves death; a changed birth is handled above.
+            let parent_dead = expected.is_some() && matches!(birth(parent), Ok(None));
             for (pid, observed) in observed_edges {
                 // The protected keeper and its whole subtree are never reached.
                 if Some(pid) == protected {
@@ -234,10 +242,21 @@ impl Inventory {
                     Err(error) => return Err(error),
                 };
                 // The handle and the edge must name the observed child of the still-same parent.
-                match (birth(pid), birth(parent)) {
-                    (Ok(Some(child)), Ok(Some(now))) if child == observed && now == before => {}
-                    (Err(error), _) | (_, Err(error)) if !scarce(&error) => return Err(error),
-                    _ => continue,
+                // A death-confirmed parent's edges are frozen; only the child's own birth
+                // needs checking against the observed edge.
+                if parent_dead {
+                    match birth(pid) {
+                        Ok(Some(child)) if child == observed => {}
+                        Ok(_) => continue,
+                        Err(error) if scarce(&error) => continue,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    match (birth(pid), birth(parent)) {
+                        (Ok(Some(child)), Ok(Some(now))) if child == observed && now == before => {}
+                        (Err(error), _) | (_, Err(error)) if !scarce(&error) => return Err(error),
+                        _ => continue,
+                    }
                 }
                 let mut denied = false;
                 match process::pidfd_send_signal(&fd, process::Signal::KILL) {
