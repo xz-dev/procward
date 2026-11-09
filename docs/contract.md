@@ -228,10 +228,13 @@ work. The option does not daemonize, detach, redirect streams, or change argv,
 environment, cwd, command status or the caller's timeout/cancellation policy.
 The routine Linux cgroup-fallback startup notice is suppressed in this new mode
 so it does not contaminate command stderr; fatal diagnostics are unchanged.
-Darwin remains best-effort, not kernel containment. In retained mode, procward
-also discovers members of the primary's original task process group after the
-primary exits, so ordinary same-group background work does not require a prior
-observer scan. The primary stays unreaped to reserve its PID/process-group
+Darwin remains best-effort, not kernel containment. For non-PTY execution,
+procward also discovers members of the primary's original task process group
+after the primary exits, so ordinary same-group background work does not require
+a prior observer scan. This discovery applies to both lifecycle policies:
+default primary exit still starts cleanup immediately; retained mode leaves
+healthy work running until completion or a cleanup request. The primary stays
+unreaped to reserve its PID/process-group
 number until a post-exit scan confirms no other group members or known or
 unknown descendants; only then is the primary reaped and its group binding
 discarded. Group candidates need a matching unique process identity and membership

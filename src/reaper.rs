@@ -118,7 +118,7 @@ pub fn run_owned(
         .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
     #[cfg(target_os = "macos")]
-    if retain_descendants && terminal.is_none() {
+    if terminal.is_none() {
         inventory.pin_task_group(primary);
     }
     #[cfg(target_os = "linux")]
