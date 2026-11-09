@@ -153,6 +153,9 @@ def main():
         sys.exit("VM-GUEST REFUSED: host kernel, not the disposable guest")
     if os.getuid() != 0:
         sys.exit("VM-GUEST REFUSED: guest root is required for isolated fixture setup")
+    # The virtme root is read-only; prepare scratch before even the boot record
+    # is written, and keep that record on the same mount as later test records.
+    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=1777", "tmpfs", "/tmp"], check=True)
     os.environ["PROCWARD_VM_HOST_BOOT_ID"] = manifest["host_boot_id"]
     emit(nonce, kind="boot", boot_id=boot, kernel=os.uname().release, uid=os.getuid(),
          pid=os.getpid())
@@ -170,7 +173,6 @@ def main():
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
         sys.exit("guest subreaper unavailable")
-    subprocess.run(["mount", "-t", "tmpfs", "-o", "mode=1777", "tmpfs", "/tmp"], check=True)
     if os.statvfs(CGROUP) and not os.path.exists(os.path.join(CGROUP, "cgroup.procs")):
         subprocess.run(["mount", "-t", "cgroup2", "none", CGROUP], check=True)
     if manifest.get("hazard"):
