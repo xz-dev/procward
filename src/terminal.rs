@@ -756,6 +756,10 @@ mod tests {
 
     #[test]
     fn background_read_after_foreground_reclaim_returns_to_cleanup() {
+        #[cfg(target_os = "macos")]
+        let _process_guard = crate::owner::tests::PROCESS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _guard = PTY_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

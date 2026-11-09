@@ -117,6 +117,10 @@ pub fn run_owned(
         .as_mut()
         .map_or(Ok(()), |handoff| handoff.ready(child.id()));
     let mut inventory = Inventory::new();
+    #[cfg(target_os = "macos")]
+    if retain_descendants && terminal.is_none() {
+        inventory.pin_task_group(primary);
+    }
     #[cfg(target_os = "linux")]
     if let Some(scope) = scope {
         inventory.own(scope);
@@ -182,7 +186,8 @@ pub fn run_owned(
                 }
             }
             // In retained task mode, X ends the command, not its ownership. Reap
-            // the exited primary and adopted descendants without signalling live work.
+            // ready exits without signalling live work; Darwin pins the primary
+            // until a post-exit inventory scan finds no remaining work.
             let retained_primary = (result.is_none() || !retain_descendants).then_some(primary);
             reap_adopted(retained_primary, &mut inventory)?;
             if retain_descendants
@@ -328,6 +333,10 @@ pub fn run_owned(
 fn reap_adopted(primary: Option<Pid>, inventory: &mut Inventory) -> io::Result<()> {
     for pid in children()? {
         if Some(pid) != primary {
+            #[cfg(target_os = "macos")]
+            if !inventory.may_reap(pid)? {
+                continue;
+            }
             match process::waitpid(Some(pid), WaitOptions::NOHANG) {
                 Ok(Some((_, status)))
                     if status.exit_status().is_some() || status.terminating_signal().is_some() =>
@@ -370,7 +379,11 @@ pub(crate) fn cleanup(
             if policy.phase(crate::policy::now()) == Phase::Expired {
                 continue 'cleanup;
             }
-            match process::wait(WaitOptions::NOHANG) {
+            #[cfg(target_os = "macos")]
+            let waited = inventory.wait();
+            #[cfg(not(target_os = "macos"))]
+            let waited = process::wait(WaitOptions::NOHANG).map_err(io::Error::from);
+            match waited {
                 Ok(Some((pid, status))) => {
                     if let Some(code) = status
                         .exit_status()
@@ -396,8 +409,8 @@ pub(crate) fn cleanup(
                     }
                     continue;
                 }
-                Err(Errno::INTR) => continue,
-                Err(Errno::CHILD) => {
+                Err(error) if error.raw_os_error() == Some(Errno::INTR.raw_os_error()) => continue,
+                Err(error) if error.raw_os_error() == Some(Errno::CHILD.raw_os_error()) => {
                     // No reapable child is not enough while the owned workload group is populated.
                     #[cfg(target_os = "linux")]
                     if !inventory.settled()? {
@@ -411,7 +424,7 @@ pub(crate) fn cleanup(
                     }
                     return Ok(());
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
                 Ok(None) => break,
             }
         }

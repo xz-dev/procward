@@ -228,7 +228,17 @@ work. The option does not daemonize, detach, redirect streams, or change argv,
 environment, cwd, command status or the caller's timeout/cancellation policy.
 The routine Linux cgroup-fallback startup notice is suppressed in this new mode
 so it does not contaminate command stderr; fatal diagnostics are unchanged.
-Darwin retains its documented observed-tree best-effort boundary.
+Darwin remains best-effort, not kernel containment. In retained mode, procward
+also discovers members of the primary's original task process group after the
+primary exits, so ordinary same-group background work does not require a prior
+observer scan. The primary stays unreaped to reserve its PID/process-group
+number until a post-exit scan confirms no other group members or known or
+unknown descendants; only then is the primary reaped and its group binding
+discarded. Group candidates need a matching unique process identity and membership
+before they gain signal authority. Previously observed descendants remain
+tracked after `setsid` or reparenting, but detaching from the task group and
+reparenting before any observation can still escape discovery. The final
+identity-check/signal race also remains; this is not a sandbox.
 
 `tests/task.rs` covers X-before-completion, healthy work beyond the cleanup
 budget, natural completion, cancellation, controller EOF, owner termination,
