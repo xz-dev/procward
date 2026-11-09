@@ -390,6 +390,10 @@ impl Inventory {
         self.0.contains_key(&pid)
     }
 
+    pub fn settled(&self) -> io::Result<bool> {
+        Ok(self.is_empty())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty() && self.1.is_empty()
     }

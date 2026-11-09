@@ -201,6 +201,42 @@ cleanup-deadline bound. Darwin C confirms a best-effort sweep, not containment.
 EOF following C is required evidence that the owning helper closed its endpoint.
 EOF on the separate application pipe is owner loss, not this task completion.
 
+## Retaining ordinary task descendants
+
+Add `--retain-descendants` to a task-controlled invocation:
+
+```sh
+procward run --retain-descendants --control-fd N -- command args
+```
+
+Windows uses `--control-handle N` instead. The option requires task control and
+cannot be repeated. Without it, primary exit still starts cleanup exactly as
+before; standalone `run` and existing task invocations retain their behavior.
+
+In retained mode, X reports the primary's native result promptly, but does not
+signal live descendants or end ownership. Procward continues observing/reaping
+ordinary descendants until they finish naturally, the controller sends CANCEL
+or disconnects, or the owner is lost. C with the matching scope plus EOF is still
+the only successful whole-tree completion evidence. Cancellation after X keeps
+the already-reported primary result; it does not invent a second command result.
+The configured cleanup budget begins when cleanup is requested, not at X, so it
+is not a lifetime limit on healthy background work.
+
+A caller must use X and its existing stdio-drain rules to decide when the command
+returns; waiting for the helper's exit would incorrectly wait for background
+work. The option does not daemonize, detach, redirect streams, or change argv,
+environment, cwd, command status or the caller's timeout/cancellation policy.
+The routine Linux cgroup-fallback startup notice is suppressed in this new mode
+so it does not contaminate command stderr; fatal diagnostics are unchanged.
+Darwin retains its documented observed-tree best-effort boundary.
+
+`tests/task.rs` covers X-before-completion, healthy work beyond the cleanup
+budget, natural completion, cancellation, controller EOF, owner termination,
+unchanged default cleanup and invalid-option rejection using causal fixture
+barriers. Linux runs each case in independent-kernel cgroup and fallback modes.
+Other supported platforms use their native matrix rows; Linux results do not
+prove Windows Job or Darwin behavior.
+
 ## Independent deadline examples
 
 Standalone managed fixtures cover a responsive primary that observes OWNER-LOSS,

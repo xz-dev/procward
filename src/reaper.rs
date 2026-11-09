@@ -43,6 +43,7 @@ pub fn run_owned(
     lease: &rustix::fd::OwnedFd,
     notice: &rustix::fd::OwnedFd,
     config: Config,
+    retain_descendants: bool,
 ) -> io::Result<u8> {
     acquire()?;
     #[cfg(target_os = "linux")]
@@ -94,6 +95,7 @@ pub fn run_owned(
     }
     crate::contract::clear(&mut payload);
     payload.env_remove("PROCWARD_PRIVATE_TASK");
+    payload.env_remove("PROCWARD_PRIVATE_RETAIN_DESCENDANTS");
     if let Some(handoff) = &handoff {
         payload.envs(handoff.environment()?);
     }
@@ -148,36 +150,48 @@ pub fn run_owned(
                     return Ok(());
                 }
             }
-            match process::waitid(
-                WaitId::Pid(primary),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            ) {
-                Ok(Some(status)) => {
-                    if let Some(code) = status
-                        .exit_status()
-                        .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
-                    {
-                        result = Some(code as u8);
-                        let _ = rustix::io::write(notice, &[b'X', code as u8]);
-                        return Ok(());
+            if result.is_none() {
+                match process::waitid(
+                    WaitId::Pid(primary),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                ) {
+                    Ok(Some(status)) => {
+                        if let Some(code) = status
+                            .exit_status()
+                            .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
+                        {
+                            result = Some(code as u8);
+                            let _ = rustix::io::write(notice, &[b'X', code as u8]);
+                            if !retain_descendants {
+                                return Ok(());
+                            }
+                        } else if status.raw_code() != 0
+                            && !status.stopped()
+                            && !status.continued()
+                            && !status.trapped()
+                        {
+                            // Darwin can report an empty/nonterminal WNOHANG notification.
+                            return Err(io::Error::other(format!(
+                                "unexpected waitid code {}",
+                                status.raw_code()
+                            )));
+                        }
                     }
-                    // Darwin can return a nonterminal/empty notification with WNOHANG.
-                    // Stopped/continued work is still alive and must retain ownership.
-                    if status.raw_code() != 0
-                        && !status.stopped()
-                        && !status.continued()
-                        && !status.trapped()
-                    {
-                        return Err(io::Error::other(format!(
-                            "unexpected waitid code {}",
-                            status.raw_code()
-                        )));
-                    }
+                    Ok(None) | Err(Errno::INTR) => {}
+                    Err(error) => return Err(error.into()),
                 }
-                Ok(None) | Err(Errno::INTR) => {}
-                Err(error) => return Err(error.into()),
             }
-            reap_adopted(primary, &mut inventory)?;
+            // In retained task mode, X ends the command, not its ownership. Reap
+            // the exited primary and adopted descendants without signalling live work.
+            let retained_primary = (result.is_none() || !retain_descendants).then_some(primary);
+            reap_adopted(retained_primary, &mut inventory)?;
+            if retain_descendants
+                && result.is_some()
+                && children()?.is_empty()
+                && inventory.settled()?
+            {
+                return Ok(());
+            }
             // Fatal requests select one immutable policy now, even if primary ignores TERM.
             let events: Vec<_> = signals.pending().collect();
             if let Some(signal) = events
@@ -224,7 +238,9 @@ pub fn run_owned(
     })();
     let policy = Policy::new(config, false);
     let published = crate::owner::publish(notice, policy);
-    let notified = if owner_lost || requested.is_some() || observed.is_err() {
+    let primary_released = retain_descendants && result.is_some();
+    let notified = if (owner_lost || requested.is_some() || observed.is_err()) && !primary_released
+    {
         handoff
             .as_mut()
             .map_or(Ok(()), |handoff| handoff.owner_lost())
@@ -232,14 +248,14 @@ pub fn run_owned(
         Ok(())
     };
     let forwarded = match requested {
-        Some(signal) => child.signal(signal),
-        None => Ok(()),
+        Some(signal) if !primary_released => child.signal(signal),
+        _ => Ok(()),
     };
     let mut fatal = observed.is_err() || requested.is_some() || owner_lost;
     let result_sent = result.is_some();
     cleanup(
         &mut inventory,
-        Some(primary),
+        (!primary_released).then_some(primary),
         &mut result,
         policy,
         |inventory| {
@@ -309,9 +325,9 @@ pub fn run_owned(
     result.ok_or_else(|| io::Error::other("primary result missing after cleanup"))
 }
 
-fn reap_adopted(primary: Pid, inventory: &mut Inventory) -> io::Result<()> {
+fn reap_adopted(primary: Option<Pid>, inventory: &mut Inventory) -> io::Result<()> {
     for pid in children()? {
-        if pid != primary {
+        if Some(pid) != primary {
             match process::waitpid(Some(pid), WaitOptions::NOHANG) {
                 Ok(Some((_, status)))
                     if status.exit_status().is_some() || status.terminating_signal().is_some() =>
