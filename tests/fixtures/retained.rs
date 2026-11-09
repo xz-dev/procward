@@ -11,6 +11,12 @@ pub fn run(dir: &Path, worker: bool) {
         fs::write(dir.join("retained-finished"), b"natural exit").unwrap();
         process::exit(17);
     }
+    #[cfg(target_os = "linux")]
+    fs::write(
+        dir.join("retained-anchor.pid"),
+        std::env::var("PROCWARD_OWNER_PID").unwrap(),
+    )
+    .unwrap();
     let _worker = super::spawn("retained-worker", dir);
     super::wait_for(&dir.join("retained-ready"));
     super::wait_for_input();

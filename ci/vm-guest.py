@@ -39,6 +39,41 @@ def subgroups(path):
     return found
 
 
+def rescue_processes(group):
+    # Snapshot before cgroup.kill destroys the evidence; a disappearing PID is normal.
+    processes = []
+    # cgroup.procs omits zombies; include our adopted children and their membership too.
+    with open(f"/proc/self/task/{os.getpid()}/children") as children:
+        adopted = children.read().split()
+    pending = [group]
+    while pending:
+        path = pending.pop()
+        try:
+            with open(os.path.join(path, "cgroup.procs")) as members:
+                pids = members.read().split()
+        except OSError:
+            continue
+        if path == group:
+            pids = sorted(set(pids + adopted), key=int)
+        for pid in pids[:64 - len(processes)]:
+            record = {"pid": int(pid)}
+            for name in ("stat", "cmdline", "cgroup", "wchan"):
+                try:
+                    with open(f"/proc/{pid}/{name}", "rb") as source:
+                        record[name] = source.read(1024).replace(b"\0", b" ").decode(errors="replace").strip()
+                except OSError as error:
+                    record[name] = str(error)
+            processes.append(record)
+        if len(processes) == 64:
+            break
+        try:
+            pending.extend(os.path.join(path, name) for name in os.listdir(path)
+                           if os.path.isdir(os.path.join(path, name)))
+        except OSError:
+            pass  # The anchor can remove its now-empty group during the snapshot.
+    return processes
+
+
 def reap_orphans():
     while True:
         try:
@@ -109,8 +144,10 @@ def run_test(nonce, mode, binary, name, index, budget, cwd, hazard=False):
             time.sleep(0.005)
     elapsed = time.monotonic() - start
     rescue = False
+    survivors = []
     if populated(group):
         rescue = True
+        survivors = rescue_processes(group)
         with open(os.path.join(group, "cgroup.kill"), "w") as kill:
             kill.write("1")
         deadline = time.monotonic() + 10
@@ -138,7 +175,8 @@ def run_test(nonce, mode, binary, name, index, budget, cwd, hazard=False):
         notes.append(f"GUEST-OOM: counter changed by {oom_delta}; not product cleanup")
     emit(nonce, kind="test", mode=mode, binary=os.path.basename(binary), test=name,
          status=status, verdict=verdict, membership=membership, rescue=rescue,
-         leftovers=leftovers, oom_kills=oom_delta, seconds=round(elapsed, 2), notes=notes[:20],
+         leftovers=leftovers, rescue_processes=survivors, oom_kills=oom_delta,
+         seconds=round(elapsed, 2), notes=notes[:20],
          output=output[-4000:] if verdict == "fail" else "")
     return [mode, os.path.basename(binary), name, verdict, status]
 

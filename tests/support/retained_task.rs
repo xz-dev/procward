@@ -14,11 +14,8 @@ struct Worker(rustix::process::Pid);
 #[cfg(windows)]
 struct Worker(std::os::windows::io::OwnedHandle);
 impl Worker {
-    fn open(dir: &Path) -> Self {
-        let pid: u32 = fs::read_to_string(dir.join("retained-worker.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
+    fn open(dir: &Path, name: &str) -> Self {
+        let pid: u32 = fs::read_to_string(dir.join(name)).unwrap().parse().unwrap();
         #[cfg(unix)]
         {
             Self(rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap())
@@ -66,7 +63,7 @@ fn fixture(name: &str, retain: bool) -> (Task, PathBuf, Worker) {
     fs::create_dir(&dir).unwrap();
     let mut task = Task::start_retained("retained-task", dir.to_str().unwrap(), retain);
     task.until(|t| t.transcript.contains("PROCWARD/1 S ") && dir.join("retained-ready").exists());
-    let worker = Worker::open(&dir);
+    let worker = Worker::open(&dir, "retained-worker.pid");
     assert!(worker.running());
     (task, dir, worker)
 }
@@ -175,6 +172,8 @@ fn retained_task_owner_loss_after_primary_exit_cleans_descendants() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (mut task, dir, worker) = fixture("owner-loss", true);
+    #[cfg(target_os = "linux")]
+    let anchor = Worker::open(&dir, "retained-anchor.pid");
     exit_primary(&mut task, &dir);
     task.child.kill().unwrap();
     assert!(!task.child.wait().unwrap().success());
@@ -183,6 +182,15 @@ fn retained_task_owner_loss_after_primary_exit_cleans_descendants() {
         assert!(
             Instant::now() < deadline,
             "owner loss exceeded cleanup deadline"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    // Worker death and controller EOF do not confirm the orphan anchor has exited.
+    #[cfg(target_os = "linux")]
+    while anchor.running() {
+        assert!(
+            Instant::now() < deadline,
+            "owner loss left the anchor alive past cleanup deadline"
         );
         thread::sleep(Duration::from_millis(2));
     }
