@@ -364,6 +364,8 @@ pub(crate) fn cleanup(
         inventory.advance(phase, protected)?;
         // Drain ready exits before another tree walk; rescanning for every zombie makes
         // teardown quadratic and can spend the whole deadline after the work already died.
+        #[cfg(target_os = "linux")]
+        let mut reaped = false;
         loop {
             if policy.phase(crate::policy::now()) == Phase::Expired {
                 continue 'cleanup;
@@ -374,6 +376,10 @@ pub(crate) fn cleanup(
                         .exit_status()
                         .or_else(|| status.terminating_signal().map(|signal| 128 + signal))
                     {
+                        #[cfg(target_os = "linux")]
+                        {
+                            reaped = true;
+                        }
                         inventory.forget(pid);
                         if Some(pid) == primary {
                             if let Some(expected) =
@@ -408,6 +414,12 @@ pub(crate) fn cleanup(
                 Err(error) => return Err(error.into()),
                 Ok(None) => break,
             }
+        }
+        // Fresh adoptions must not pay a fixed delay for each tree generation.
+        #[cfg(target_os = "linux")]
+        if phase == Phase::Kill && reaped {
+            thread::yield_now();
+            continue;
         }
         if protected.is_some() {
             thread::yield_now();
