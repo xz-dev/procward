@@ -137,6 +137,29 @@ fn cli(args: Vec<OsString>) -> Result<u32, (u8, String)> {
 
 pub(crate) fn diagnostic(message: String) {
     use std::{sync::mpsc, time::Duration};
+    #[cfg(target_os = "linux")]
+    {
+        use std::{
+            fs::OpenOptions,
+            io::Write,
+            os::unix::fs::{FileTypeExt, OpenOptionsExt},
+        };
+        if std::fs::metadata("/proc/self/fd/2").is_ok_and(|metadata| metadata.file_type().is_fifo())
+        {
+            // A captured pipe must not depend on a new thread being scheduled.
+            // Reopening gives an independent open-file description; dup plus
+            // O_NONBLOCK would change the caller's inherited flags.
+            if let Ok(mut pipe) = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open("/proc/self/fd/2")
+            {
+                let line = format!("procward: {message}\n");
+                let _ = pipe.write(line.as_bytes());
+                return;
+            }
+        }
+    }
     let (send, receive) = mpsc::sync_channel(1);
     // A full inherited stderr must not retain a cleaned controller or block failover.
     if std::thread::Builder::new()
