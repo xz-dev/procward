@@ -28,7 +28,7 @@ mod windows;
 const USAGE: &str = concat!(
     "procward ",
     env!("CARGO_PKG_VERSION"),
-    "\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nUnix terminal jobs use a private PTY; redirected streams retain their destinations.\nTask control: --control-fd <fd> (Unix), --control-handle <handle> (Windows).\n--quiet suppresses only the routine Linux cgroup-fallback startup notice; errors remain visible.\n--retain-descendants keeps task descendants alive after the primary exits (requires task control)."
+    "\n\nUsage: procward run [options] -- <command> [args...]\n       procward --help\n       procward --version\n\nOptions: --grace <dur> --fatal-grace <dur> --cleanup-deadline <dur>\nDurations: integer ms or s suffix (for example 750ms, 6s).\n\nUnix terminal jobs use a private PTY; redirected streams retain their destinations.\nTask control: --control-fd <fd> (Unix/native or Windows/CRT descriptor), --control-handle <handle> (Windows raw HANDLE).\n--quiet suppresses only the routine Linux cgroup-fallback startup notice; errors remain visible.\n--retain-descendants keeps task descendants alive after the primary exits (requires task control)."
 );
 fn main() -> ExitCode {
     match cli(env::args_os().skip(1).collect()) {
