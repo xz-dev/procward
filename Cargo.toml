@@ -82,7 +82,7 @@ libc = "=0.2.191"
 process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
 rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "pipe", "time", "termios", "stdio", "net", "event", "pty"] }
 rustix-openpty = "=0.2.0"
-signal-hook = { version = "=0.4.5", default-features = false, features = ["iterator"] }
+signal-hook = { version = "=0.4.6", default-features = false, features = ["iterator"] }
 
 [profile.dist]
 inherits = "release"
